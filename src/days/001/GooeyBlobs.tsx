@@ -5,12 +5,16 @@ import {
   useMotionValue,
   useReducedMotion,
   useSpring,
+  useTransform,
   type MotionValue,
 } from 'motion/react'
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from 'react'
+import { useTilt } from './useTilt.ts'
 
 const MAX_DROPS = 8
 const BLOB_PX = 100
+// After the last pointer input, tilt takes over the head of the trail.
+const POINTER_IDLE_MS = 1200
 
 const dialConfig = {
   blobs: [8, 3, 12, 1],
@@ -22,6 +26,8 @@ const dialConfig = {
   threshold: [0.2, 0, 1, 0.01],
   hue: [322, 0, 360, 1],
   gloss: [0.55, 0, 1, 0.01],
+  tilt: true,
+  'tilt strength': [0.6, 0, 2, 0.05],
   calm: false,
   'reset scene': { type: 'action' },
   'reset dials': { type: 'action' },
@@ -78,6 +84,41 @@ function BlobChain(props: ChainProps) {
   )
 }
 
+const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi))
+
+type DropProps = {
+  drop: Drop
+  size: number
+  color: string
+  calm: boolean
+  offsetX: MotionValue<number>
+  offsetY: MotionValue<number>
+  popIn: object
+}
+
+// A dropped blob springs toward its home plus the tilt offset, held inside the viewport,
+// so a strong tilt piles drops against the low edge where they merge.
+function DropBlob({ drop, size, color, calm, offsetX, offsetY, popIn }: DropProps) {
+  const d = size * drop.scale
+  const tx = useTransform(offsetX, (o) => clamp(drop.x + o, d / 2, window.innerWidth - d / 2))
+  const ty = useTransform(offsetY, (o) => clamp(drop.y + o, d / 2, window.innerHeight - d / 2))
+  // Underdamped so drops slosh; heavier drops lag a little. Calm is critically damped.
+  const stiffness = calm ? 18 : 34 + (1 - drop.scale) * 40
+  const opts = { stiffness, damping: calm ? 2 * Math.sqrt(stiffness) : 6, mass: 1 }
+  const x = useSpring(tx, opts)
+  const y = useSpring(ty, opts)
+
+  return (
+    <motion.div className="pointer-events-none absolute top-0 left-0" style={{ x, y }}>
+      <motion.div
+        {...popIn}
+        className="rounded-full"
+        style={{ width: d, height: d, marginLeft: -d / 2, marginTop: -d / 2, background: color }}
+      />
+    </motion.div>
+  )
+}
+
 export function GooeyBlobs() {
   const prefersReduced = useReducedMotion() ?? false
   const actionRef = useRef<(path: string) => void>(() => {})
@@ -106,18 +147,64 @@ export function GooeyBlobs() {
     }
   })
 
+  const lastPointerAt = useRef(-Infinity)
+  const pointerHeld = useRef(false)
+
   useEffect(() => {
     const move = (e: globalThis.PointerEvent) => {
       pointerX.set(e.clientX)
       pointerY.set(e.clientY)
+      lastPointerAt.current = performance.now()
+    }
+    const down = (e: globalThis.PointerEvent) => {
+      pointerHeld.current = true
+      move(e)
+    }
+    const up = () => {
+      pointerHeld.current = false
+      lastPointerAt.current = performance.now()
     }
     window.addEventListener('pointermove', move, { passive: true })
-    window.addEventListener('pointerdown', move, { passive: true })
+    window.addEventListener('pointerdown', down, { passive: true })
+    window.addEventListener('pointerup', up, { passive: true })
+    window.addEventListener('pointercancel', up, { passive: true })
     return () => {
       window.removeEventListener('pointermove', move)
-      window.removeEventListener('pointerdown', move)
+      window.removeEventListener('pointerdown', down)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
     }
   }, [pointerX, pointerY])
+
+  // Tilt as a pixel offset; reduced motion keeps it gentler.
+  const offsetX = useMotionValue(0)
+  const offsetY = useMotionValue(0)
+  const strength = v.tilt ? v['tilt strength'] * (calm ? 0.4 : 1) : 0
+  const strengthRef = useRef(strength)
+  useEffect(() => {
+    strengthRef.current = strength
+    if (strength === 0) {
+      offsetX.set(0)
+      offsetY.set(0)
+    }
+  }, [strength, offsetX, offsetY])
+
+  const onGravity = useCallback(
+    (gx: number, gy: number) => {
+      const reach = Math.max(window.innerWidth, window.innerHeight) * strengthRef.current
+      // Light low-pass on top of the springs to take the jitter out of raw sensor readings.
+      offsetX.set(offsetX.get() * 0.7 + gx * reach * 0.3)
+      offsetY.set(offsetY.get() * 0.7 + gy * reach * 0.3)
+      const idle = !pointerHeld.current && performance.now() - lastPointerAt.current > POINTER_IDLE_MS
+      if (idle && strengthRef.current > 0) {
+        const m = v.size / 2
+        pointerX.set(clamp(window.innerWidth / 2 + offsetX.get(), m, window.innerWidth - m))
+        pointerY.set(clamp(window.innerHeight / 2 + offsetY.get(), m, window.innerHeight - m))
+      }
+    },
+    [offsetX, offsetY, pointerX, pointerY, v.size],
+  )
+  const tilt = useTilt(v.tilt, onGravity)
 
   const onPointerDown = (e: PointerEvent) => {
     downAt.current = { x: e.clientX, y: e.clientY }
@@ -185,23 +272,16 @@ export function GooeyBlobs() {
         <div className="absolute inset-0" style={{ filter: 'url(#goo)' }}>
           <AnimatePresence>
             {drops.map((d) => (
-              <motion.div
+              <DropBlob
                 key={d.id}
-                className="pointer-events-none absolute top-0 left-0"
-                style={{ x: d.x, y: d.y }}
-              >
-                <motion.div
-                  {...popIn}
-                  className="rounded-full"
-                  style={{
-                    width: v.size * d.scale,
-                    height: v.size * d.scale,
-                    marginLeft: (-v.size * d.scale) / 2,
-                    marginTop: (-v.size * d.scale) / 2,
-                    background: color,
-                  }}
-                />
-              </motion.div>
+                drop={d}
+                size={v.size}
+                color={color}
+                calm={calm}
+                offsetX={offsetX}
+                offsetY={offsetY}
+                popIn={popIn}
+              />
             ))}
           </AnimatePresence>
           <BlobChain
@@ -227,9 +307,24 @@ export function GooeyBlobs() {
           {calm && <span className="block text-white/35 sm:ml-2 sm:inline">· calm mode</span>}
         </div>
 
-        <div data-chrome className="pointer-events-none absolute right-4 bottom-4 flex items-center gap-3 sm:right-5 sm:bottom-5">
+        {v.tilt && tilt.status === 'prompt' && (
+          <button
+            type="button"
+            data-chrome
+            onPointerDown={(e) => e.stopPropagation()}
+            onPointerUp={(e) => e.stopPropagation()}
+            onClick={tilt.request}
+            className="absolute top-4 left-4 rounded-full border border-white/15 bg-white/5 px-3 py-1.5 font-mono text-[11px] text-white/70 backdrop-blur transition-colors hover:border-white/30 hover:text-white focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:outline-none sm:top-5 sm:left-5"
+          >
+            enable tilt
+          </button>
+        )}
+
+        {/* Centered on wider screens, where the open DialKit panel reaches the bottom-right corner. */}
+        <div data-chrome className="pointer-events-none absolute right-4 bottom-4 flex items-center gap-3 sm:right-auto sm:bottom-5 sm:left-1/2 sm:-translate-x-1/2">
           <span className="hidden font-mono text-[11px] text-white/30 sm:inline">
             click to drop · {drops.length}/{MAX_DROPS}
+            {v.tilt && tilt.status === 'active' && ' · tilt'}
           </span>
           <button
             type="button"

@@ -17,7 +17,7 @@ npm run preview  # serve dist/ at http://localhost:43118
 
 | Day | Title | Concept |
 | --- | --- | --- |
-| [001](./001/) | gooey cursor blobs | Spring-chained metaballs (SVG blur + alpha-threshold filter) that stretch on fast moves and melt back together. Click to drop blobs, then drag the goo into them. |
+| [001](./001/) | gooey cursor blobs | Spring-chained metaballs (SVG blur + alpha-threshold filter) that stretch on fast moves and melt back together. Click to drop blobs, then drag the goo into them. On a phone, tilt to slosh everything toward the low side (iOS asks via an "enable tilt" button). |
 
 ## Adding a day
 
