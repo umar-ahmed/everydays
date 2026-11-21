@@ -15,14 +15,19 @@ function resolveSiteUrl(env: Record<string, string>): string {
   return 'http://localhost:43118'
 }
 
+// The site URL's path doubles as Vite's `base`, so a sub-path deploy
+// (e.g. https://user.github.io/everydays) needs only SITE_URL.
+const basePath = (siteUrl: string) => new URL(siteUrl).pathname.replace(/\/*$/, '/')
+
 const escapeHtml = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
-function openGraph(siteUrl: string): Plugin {
+function openGraph(siteUrl: string, base: string): Plugin {
   return {
     name: 'everydays-open-graph',
     transformIndexHtml(html, ctx) {
-      const slug = ctx.path.match(/^\/(\d{3})\//)?.[1]
+      const pagePath = ctx.path.startsWith(base) ? `/${ctx.path.slice(base.length)}` : ctx.path
+      const slug = pagePath.match(/^\/(\d{3})\//)?.[1]
       const day = slug ? days.find((d) => d.slug === slug) : undefined
       const path = day ? `/${day.slug}/` : '/'
       const title = day ? `day ${day.slug} / ${day.title} · ${site.name}` : site.name
@@ -58,6 +63,7 @@ function openGraph(siteUrl: string): Plugin {
 export default defineConfig(({ mode }) => {
   const env = { ...process.env, ...loadEnv(mode, root, '') } as Record<string, string>
   const siteUrl = resolveSiteUrl(env)
+  const base = basePath(siteUrl)
 
   const input: Record<string, string> = { index: resolve(root, 'index.html') }
   for (const day of days) {
@@ -67,7 +73,8 @@ export default defineConfig(({ mode }) => {
   }
 
   return {
-    plugins: [react(), tailwindcss(), openGraph(siteUrl)],
+    base,
+    plugins: [react(), tailwindcss(), openGraph(siteUrl, base)],
     build: { rollupOptions: { input } },
     server: { port: 43117, host: true },
     preview: { port: 43118, host: true },

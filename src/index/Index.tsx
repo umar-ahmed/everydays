@@ -29,7 +29,7 @@ export function Index() {
             className="border-b border-white/10"
           >
             <a
-              href={`/${day.slug}/`}
+              href={`${import.meta.env.BASE_URL}${day.slug}/`}
               className="group flex items-baseline gap-5 py-6 outline-none focus-visible:bg-white/5 sm:gap-8"
             >
               <span className="font-mono text-sm text-fuchsia-300/80 tabular-nums">{day.slug}</span>

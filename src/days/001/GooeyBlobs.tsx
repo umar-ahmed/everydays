@@ -219,7 +219,7 @@ export function GooeyBlobs() {
         </div>
 
         <div className="pointer-events-none absolute bottom-4 left-4 max-w-[65vw] font-mono text-[11px] tracking-wide text-white/55 sm:bottom-5 sm:left-5">
-          <a href="/" className="pointer-events-auto text-white/35 transition-colors hover:text-white/80">
+          <a href={import.meta.env.BASE_URL} className="pointer-events-auto text-white/35 transition-colors hover:text-white/80">
             everydays
           </a>
           <span className="text-white/25"> / </span>

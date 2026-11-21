@@ -38,8 +38,12 @@ Every page gets `og:title`, `og:description`, `og:image`, `og:url` and `twitter:
 
 On Vercel, set `SITE_URL` in the project's environment variables once you have the domain. Until then, the Vercel production URL is used automatically.
 
-`npm run og` regenerates `public/og.png` (the index card) and `public/001/og.png`. Run it while `npm run dev` is running. It drives the real day 001 page on a fake clock so the screenshot comes out the same every run. Set `OG_FRAME` to pick a different frame of the sweep.
+`npm run og` regenerates `public/og.png` (the index card) and `public/001/og.png`. Run it while `npm run dev` is running (set `OG_BASE` to the dev URL including any base path, e.g. `http://localhost:43117/everydays`). It drives the real day 001 page on a fake clock so the screenshot comes out the same every run. Set `OG_FRAME` to pick a different frame of the sweep.
+
+If the base URL has a path (e.g. `https://umar-ahmed.github.io/everydays`), that path also becomes Vite's `base`, so assets and links are served from `/everydays/`. In code, build in-site links from `import.meta.env.BASE_URL` rather than a leading `/`.
 
 ## Deploying
+
+The site is live at <https://umar-ahmed.github.io/everydays/>. `.github/workflows/pages.yml` builds and deploys it to GitHub Pages on every push to `main`, with `SITE_URL` set to the Pages URL.
 
 `vercel.json` sets the build to `npm run build` with output in `dist/`. Any static host that serves `dist/` works.
