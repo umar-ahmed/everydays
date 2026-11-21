@@ -5,16 +5,18 @@ import {
   useMotionValue,
   useReducedMotion,
   useSpring,
-  useTransform,
   type MotionValue,
 } from 'motion/react'
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from 'react'
+import { step, type Body } from './physics.ts'
 import { useTilt } from './useTilt.ts'
 
 const MAX_DROPS = 8
 const BLOB_PX = 100
 // After the last pointer input, tilt takes over the head of the trail.
 const POINTER_IDLE_MS = 1200
+// Gravity dial 1 at full tilt, in px/s².
+const GRAVITY_PX = 2600
 
 const dialConfig = {
   blobs: [8, 3, 12, 1],
@@ -27,7 +29,9 @@ const dialConfig = {
   hue: [322, 0, 360, 1],
   gloss: [0.55, 0, 1, 0.01],
   tilt: true,
-  'tilt strength': [0.6, 0, 2, 0.05],
+  gravity: [1, 0, 3, 0.05],
+  friction: [0.9, 0, 4, 0.05],
+  bounce: [0.65, 0, 1, 0.01],
   calm: false,
   'reset scene': { type: 'action' },
   'reset dials': { type: 'action' },
@@ -84,29 +88,31 @@ function BlobChain(props: ChainProps) {
   )
 }
 
-const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi))
-
 type DropProps = {
   drop: Drop
   size: number
   color: string
-  calm: boolean
-  offsetX: MotionValue<number>
-  offsetY: MotionValue<number>
+  bodies: Map<number, Body>
   popIn: object
 }
 
-// A dropped blob springs toward its home plus the tilt offset, held inside the viewport,
-// so a strong tilt piles drops against the low edge where they merge.
-function DropBlob({ drop, size, color, calm, offsetX, offsetY, popIn }: DropProps) {
+// Position comes from the physics loop when tilt is live; otherwise the drop rests where it landed.
+function DropBlob({ drop, size, color, bodies, popIn }: DropProps) {
   const d = size * drop.scale
-  const tx = useTransform(offsetX, (o) => clamp(drop.x + o, d / 2, window.innerWidth - d / 2))
-  const ty = useTransform(offsetY, (o) => clamp(drop.y + o, d / 2, window.innerHeight - d / 2))
-  // Underdamped so drops slosh; heavier drops lag a little. Calm is critically damped.
-  const stiffness = calm ? 18 : 34 + (1 - drop.scale) * 40
-  const opts = { stiffness, damping: calm ? 2 * Math.sqrt(stiffness) : 6, mass: 1 }
-  const x = useSpring(tx, opts)
-  const y = useSpring(ty, opts)
+  const x = useMotionValue(drop.x)
+  const y = useMotionValue(drop.y)
+
+  useEffect(() => {
+    bodies.set(drop.id, { x: drop.x, y: drop.y, vx: 0, vy: 0, r: 0, mx: x, my: y })
+    return () => {
+      bodies.delete(drop.id)
+    }
+  }, [bodies, drop, x, y])
+
+  useEffect(() => {
+    const body = bodies.get(drop.id)
+    if (body) body.r = d / 2
+  }, [bodies, drop.id, d])
 
   return (
     <motion.div className="pointer-events-none absolute top-0 left-0" style={{ x, y }}>
@@ -176,35 +182,58 @@ export function GooeyBlobs() {
     }
   }, [pointerX, pointerY])
 
-  // Tilt as a pixel offset; reduced motion keeps it gentler.
-  const offsetX = useMotionValue(0)
-  const offsetY = useMotionValue(0)
-  const strength = v.tilt ? v['tilt strength'] * (calm ? 0.4 : 1) : 0
-  const strengthRef = useRef(strength)
-  useEffect(() => {
-    strengthRef.current = strength
-    if (strength === 0) {
-      offsetX.set(0)
-      offsetY.set(0)
-    }
-  }, [strength, offsetX, offsetY])
-
-  const onGravity = useCallback(
-    (gx: number, gy: number) => {
-      const reach = Math.max(window.innerWidth, window.innerHeight) * strengthRef.current
-      // Light low-pass on top of the springs to take the jitter out of raw sensor readings.
-      offsetX.set(offsetX.get() * 0.7 + gx * reach * 0.3)
-      offsetY.set(offsetY.get() * 0.7 + gy * reach * 0.3)
-      const idle = !pointerHeld.current && performance.now() - lastPointerAt.current > POINTER_IDLE_MS
-      if (idle && strengthRef.current > 0) {
-        const m = v.size / 2
-        pointerX.set(clamp(window.innerWidth / 2 + offsetX.get(), m, window.innerWidth - m))
-        pointerY.set(clamp(window.innerHeight / 2 + offsetY.get(), m, window.innerHeight - m))
-      }
-    },
-    [offsetX, offsetY, pointerX, pointerY, v.size],
-  )
+  const gravityRef = useRef({ x: 0, y: 0 })
+  const onGravity = useCallback((gx: number, gy: number) => {
+    // Light low-pass to take the jitter out of raw sensor readings.
+    const g = gravityRef.current
+    g.x = g.x * 0.5 + gx * 0.5
+    g.y = g.y * 0.5 + gy * 0.5
+  }, [])
   const tilt = useTilt(v.tilt, onGravity)
+
+  const [bodies] = useState(() => new Map<number, Body>())
+  // Reduced motion: weaker gravity, more friction, softer bounces.
+  const world = {
+    gravity: v.gravity * GRAVITY_PX * (calm ? 0.4 : 1),
+    friction: v.friction + (calm ? 2.5 : 0),
+    bounce: v.bounce * (calm ? 0.5 : 1),
+  }
+  const worldRef = useRef(world)
+  const sizeRef = useRef(v.size)
+  useEffect(() => {
+    worldRef.current = world
+    sizeRef.current = v.size
+  })
+
+  const physics = v.tilt && tilt.status === 'active'
+  useEffect(() => {
+    if (!physics) return
+    const head: Body = { x: pointerX.get(), y: pointerY.get(), vx: 0, vy: 0, r: 0, mx: pointerX, my: pointerY }
+    let last = performance.now()
+    let raf = requestAnimationFrame(function frame(now) {
+      // Real elapsed time in fixed substeps, so slow frames don't turn into slow motion.
+      // The cap only stops a jump after the tab was hidden.
+      const elapsed = Math.min((now - last) / 1000, 0.1)
+      last = now
+      const steps = Math.max(1, Math.ceil(elapsed * 120))
+      const list = [...bodies.values()]
+      const idle = !pointerHeld.current && now - lastPointerAt.current > POINTER_IDLE_MS
+      if (idle) {
+        head.r = sizeRef.current / 2
+        list.push(head)
+      } else {
+        // The pointer owns the head; pick up from wherever it leaves it, at rest.
+        head.x = pointerX.get()
+        head.y = pointerY.get()
+        head.vx = head.vy = 0
+      }
+      const g = gravityRef.current
+      const w = { ...worldRef.current, gx: g.x, gy: g.y, width: window.innerWidth, height: window.innerHeight }
+      for (let i = 0; i < steps; i++) step(list, w, elapsed / steps)
+      raf = requestAnimationFrame(frame)
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [physics, bodies, pointerX, pointerY])
 
   const onPointerDown = (e: PointerEvent) => {
     downAt.current = { x: e.clientX, y: e.clientY }
@@ -277,9 +306,7 @@ export function GooeyBlobs() {
                 drop={d}
                 size={v.size}
                 color={color}
-                calm={calm}
-                offsetX={offsetX}
-                offsetY={offsetY}
+                bodies={bodies}
                 popIn={popIn}
               />
             ))}
