@@ -24,6 +24,12 @@ export type Params = SheetParams & {
   wrinkle: number
   wrinkleScale: number
   sharpness: number
+  /** Crumple: amount, scale, crease sharpness, film-vs-dome balance, seed. */
+  crumple: number
+  crumpleScale: number
+  crumpleSharpness: number
+  crumpleBalance: number
+  crumpleSeed: number
   /** Studio: strip-box and rim/kicker intensities, rotation of the whole rig (degrees). */
   keyStrip: number
   rimLight: number
@@ -209,9 +215,14 @@ export class BubbleWrapApp {
 
   reset() {
     this.loadSheet(this.sheet)
+    this.apply(this.params)
   }
 
+  /** Re-rolled for every sheet (and New sheet), so each one crumples differently. */
+  private sheetSeed = Math.random() * 1000
+
   private loadSheet(sheet: Sheet) {
+    this.sheetSeed = Math.random() * 1000
     this.generation++
     this.sim.load(sheet, this.params.fill)
     const { look } = this
@@ -269,8 +280,14 @@ export class BubbleWrapApp {
     tint.convertLinearToSRGB()
     look.tint.value.set(tint.r, tint.g, tint.b)
     look.density.value = p.density
+    look.crumple.value = p.crumple
+    look.crumpleScale.value = p.crumpleScale
+    look.crumpleSharpness.value = p.crumpleSharpness
+    look.crumpleBalance.value = p.crumpleBalance
+    look.crumpleSeed.value = p.crumpleSeed * 7.31 + this.sheetSeed
     // The strip boxes and kickers live in the environment; the punctual lights add the sharpest glints.
-    this.key.intensity = 0.25 * p.keyStrip
+    // The env strips do the lighting; a point key on glossy film only makes hot dots.
+    this.key.intensity = 0.05 * p.keyStrip
     this.fill.intensity = 0
     this.rim.intensity = p.rimLight
     const turn = THREE.MathUtils.degToRad(p.lightRotation)

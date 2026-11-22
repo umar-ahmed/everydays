@@ -1,4 +1,5 @@
 import {
+  If,
   log,
   sqrt,
   cameraPosition,
@@ -31,6 +32,7 @@ import {
   varying,
   vec2,
   vec3,
+  vec4,
   vertexIndex,
 } from 'three/tsl'
 import * as THREE from 'three/webgpu'
@@ -43,7 +45,7 @@ export class FilmLook {
   readonly thickness = uniform(420)
   readonly iridescence = uniform(0.35)
   readonly haze = uniform(0.08)
-  readonly wrinkle = uniform(0.45)
+  readonly wrinkle = uniform(0.25)
   readonly wrinkleScale = uniform(1)
   readonly sharpness = uniform(0.4)
   /** Refraction depth of a full dome, cm: each dome reads as a small lens. */
@@ -58,6 +60,12 @@ export class FilmLook {
   /** Beer-Lambert tint: transmittance colour for one film pass, raised to the Density power. */
   readonly tint = uniform(new THREE.Vector3(1, 1, 1))
   readonly density = uniform(1)
+  /** Crumple: faceted crease network. Amount, cell scale, crease sharpness, film-vs-dome balance, seed. */
+  readonly crumple = uniform(0.45)
+  readonly crumpleScale = uniform(1)
+  readonly crumpleSharpness = uniform(0.7)
+  readonly crumpleBalance = uniform(0.65)
+  readonly crumpleSeed = uniform(0)
 
   /** Offset of each dome's focused spot on the table, away from the key light (cm). */
   readonly spot = uniform(new THREE.Vector2(0.2, 0.15))
@@ -189,7 +197,66 @@ export class FilmLook {
     const dotsHeight = e.mul(texMask)
     const isGrid = this.texture.equal(1)
     const isDots = this.texture.equal(2)
-    const grad = wrinkleGrad.add(select(isGrid, gridGrad, select(isDots, dotsGrad, vec2(0))))
+    // Crumple: a Voronoi crease network where every cell is a flat facet with its own random
+    // tilt, so strip reflections break into shards and streaks. Three warped octaves; across a
+    // crease the tilt switches from one facet to the next over a width set by Crease sharpness
+    // (never under ~1.5 px), and each octave fades once its cells shrink below ~4 px.
+    const hash2 = (q: Node<'vec2'>) =>
+      fract(sin(vec2(dot(q, vec2(127.1, 311.7)), dot(q, vec2(269.5, 183.3))).add(this.crumpleSeed)).mul(43758.5453))
+    const facets = Fn(([p, width]: [Node<'vec2'>, Node<'float'>]) => {
+      const cell = floor(p)
+      const d1 = float(8).toVar()
+      const d2 = float(8).toVar()
+      const id1 = vec2(0).toVar()
+      const id2 = vec2(0).toVar()
+      for (let y = -1; y <= 1; y++) {
+        for (let x = -1; x <= 1; x++) {
+          const c = cell.add(vec2(x, y))
+          const site = c.add(hash2(c).mul(0.85).add(0.075))
+          const d = length(p.sub(site))
+          If(d.lessThan(d1), () => {
+            d2.assign(d1)
+            id2.assign(id1)
+            d1.assign(d)
+            id1.assign(c)
+          }).ElseIf(d.lessThan(d2), () => {
+            d2.assign(d)
+            id2.assign(c)
+          })
+        }
+      }
+      const tilt = (id: Node<'vec2'>) => hash2(id.add(vec2(17.31, 5.17))).sub(0.5).mul(2)
+      // 0 on the crease line, 1 well inside a facet.
+      const edge = smoothstep(0, width, d2.sub(d1))
+      const slope = mix(tilt(id1).add(tilt(id2)).mul(0.5), tilt(id1), edge)
+      return vec4(slope, oneMinus(edge), 0)
+    })
+    const scale = this.crumpleScale.div(0.35)
+    const warp = vec2(mx_noise_float(vec3(restXZ.mul(0.6), 4.2)), mx_noise_float(vec3(restXZ.mul(0.6), 9.7))).mul(0.35)
+    const base = restXZ.add(warp).mul(scale)
+    const creaseWidth = mix(float(0.3), float(0.03), this.crumpleSharpness)
+    let crumpleGrad: Node<'vec2'> = vec2(0)
+    let creaseLines: Node<'float'> = float(0)
+    for (const [freq, weight, offset] of [
+      [1, 0.55, 0],
+      [2.3, 0.3, 31.7],
+      [5.3, 0.15, 71.3],
+    ] as const) {
+      const q = base.mul(freq).add(offset)
+      const px = fwidth(q.x).add(fwidth(q.y))
+      const fade = smoothstep(0.3, 0.12, px)
+      const f = facets(q, max(creaseWidth, px.mul(1.5)))
+      crumpleGrad = crumpleGrad.add(f.xy.mul(weight).mul(fade))
+      creaseLines = creaseLines.add(f.z.mul(weight).mul(fade))
+    }
+    // Tension smooths taut domes; the flat film crumples most, collapsed and squeezed film far more.
+    const crumpleMask = mix(oneMinus(this.crumpleBalance), float(1), oneMinus(inside))
+      .add(popped.mul(inside).mul(1.6))
+      .add(smoothstep(0.03, 0.2, n.w))
+      .mul(this.crumple)
+    const grad = wrinkleGrad
+      .add(select(isGrid, gridGrad, select(isDots, dotsGrad, vec2(0))))
+      .add(crumpleGrad.mul(crumpleMask).mul(1.3))
     const texHeight = select(isGrid, gridHeight, select(isDots, dotsHeight, float(0)))
 
     const N = normalize(n.xyz)
@@ -199,7 +266,11 @@ export class FilmLook {
     film.normalNode = transformNormalToView(bent).normalize().mul(faceDirection)
     // Emboss ridges glint: a touch smoother than the surrounding haze.
     film.roughnessNode = max(
-      this.haze.add(h0.mul(this.wrinkle).mul(mask).mul(mix(float(0.04), float(0.12), resolved))).sub(texHeight.mul(0.06)),
+      this.haze
+        .add(h0.mul(this.wrinkle).mul(mask).mul(mix(float(0.04), float(0.12), resolved)))
+        .sub(texHeight.mul(0.06))
+        // Folds are a little rougher, like whitened stress lines.
+        .add(creaseLines.mul(crumpleMask).mul(0.08)),
       0.02,
     )
     // Beer-Lambert: transmittance exp(-sigma L), with the path length L growing at grazing angles;

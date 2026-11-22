@@ -30,12 +30,13 @@ export function studioEnvironment(renderer: THREE.WebGPURenderer, { key, rim }: 
   // and silhouettes pick up the lights.
   // Overhead softbox straight up, leaning toward the camera: dome tops.
   panel(8, 4, key * 0.7, 0, 9, 3)
-  // Vertical strip boxes left and right: long bars down the sides of every dome.
-  panel(0.8, 8, key, -8, 2.5, 1)
-  panel(0.8, 8, key * 0.8, 8, 2.5, -1)
-  // Long, low horizontal strips behind the set: bars along the far slopes.
-  panel(12, 0.5, key * 0.9, 0, 3, -8)
-  panel(12, 0.3, key * 0.5, 0, 1.2, -8.5)
+  // Long vertical strip boxes left and right: streaks down the sides of every dome and facet.
+  panel(1.3, 14, key, -8, 3, 1)
+  panel(1.3, 14, key * 0.8, 8, 3, -1)
+  // Wide, low horizontal strips behind and in front of the set: bars along slopes and folds.
+  panel(18, 0.8, key * 0.9, 0, 3, -8)
+  panel(18, 0.45, key * 0.5, 0, 1.2, -8.5)
+  panel(16, 0.5, key * 0.45, 0, 2, 9)
   // Edge kickers just above and below the horizon, all the way round: grazing rays off dome
   // rims, folds and silhouettes land here, which is what makes clear plastic glow at its edges.
   for (let k = 0; k < 8; k++) {
