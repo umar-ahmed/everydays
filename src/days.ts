@@ -13,6 +13,12 @@ export const days: Day[] = [
     concept: 'A spring-chained trail of metaballs that stretches on fast moves and melts back into one blob.',
     date: '2026-11-21',
   },
+  {
+    slug: '002',
+    title: 'bubble wrap',
+    concept: 'Physically based bubble wrap: an XPBD cloth with gas-filled domes on the GPU that pop, with synthesized sound, when you squeeze them.',
+    date: '2026-11-22',
+  },
 ]
 
 export const site = {
