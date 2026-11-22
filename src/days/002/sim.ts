@@ -108,12 +108,24 @@ export class BubbleSim {
   readonly roller = uniform(0)
   readonly rollerHalf = uniform(3)
   readonly friction = uniform(0.6)
+  /** Cap vertices stay at least this far (cm) above the back film. */
+  readonly capGap = uniform(0.004)
+  /**
+   * The flat back film the domes are sealed onto: bonded vertices (outside every footprint) copy
+   * the cloth, and a harmonic fill spans it flat across each footprint, so it bends and lifts
+   * with the sheet. Volumes are measured between cap and back film; caps can't pass through it.
+   */
+  readonly back = instancedArray(MAX_VERTS, 'vec4')
+  readonly back2 = instancedArray(MAX_VERTS, 'vec4')
   readonly omega = uniform(1.9)
   /** Pinhole venting, atm of gas per second per atm of excess pressure. */
   readonly leakRate = uniform(80)
 
   private readonly kernels: ComputeNode[]
   private readonly normals: ComputeNode
+  private readonly backFill: ComputeNode[]
+  /** Harmonic-fill passes per frame (even); warm-started from the last frame. */
+  backIterations = 16
   private readonly solveQP: ComputeNode
   /** Jacobi passes per substep; odd, so the last pass lands in q for finalize. */
   iterations = 7
@@ -136,10 +148,16 @@ export class BubbleSim {
         const p1 = x.element(i0.add(1)).xyz
         const p2 = x.element(i0.add(uW).add(1)).xyz
         const p3 = x.element(i0.add(uW)).xyz
+        // Gas sits between the cap and the back film, not a world plane.
+        const base = this.back
+          .element(i0)
+          .y.add(this.back.element(i0.add(1)).y)
+          .add(this.back.element(i0.add(uW).add(1)).y)
+          .add(this.back.element(i0.add(uW)).y)
         const a = p2.sub(p0)
         const c = p3.sub(p1)
         const area = a.x.mul(c.z).sub(a.z.mul(c.x)).mul(0.5)
-        volume.addAssign(area.mul(p0.y.add(p1.y).add(p2.y).add(p3.y)).mul(0.25))
+        volume.addAssign(area.mul(p0.y.add(p1.y).add(p2.y).add(p3.y).sub(base)).mul(0.25))
       })
       const pop = pops.element(b)
       const v0 = pop.w
@@ -243,6 +261,11 @@ export class BubbleSim {
       If(pos.y.lessThan(0), () => {
         pos.assign(vec3(mix(pos.x, prev.x, this.friction), 0, mix(pos.z, prev.z, this.friction)))
       })
+      // A collapsed cap rests on the back film instead of passing through it.
+      const floor = this.back.element(i).y.add(this.capGap)
+      If(meta.element(i).y.greaterThan(0.5).and(pos.y.lessThan(floor)), () => {
+        pos.assign(vec3(pos.x, floor, pos.z))
+      })
       v.element(i).assign(vec4(pos.sub(prev).div(this.dt), 0))
       x.element(i).assign(vec4(pos, 1))
     })().compute(MAX_VERTS)
@@ -254,6 +277,20 @@ export class BubbleSim {
       const squeeze = clamp(float(1).sub(length(n).div(max(length(around(i, rest)), 1e-8))), 0, 1)
       this.normal.element(i).assign(vec4(normalize(n), squeeze))
     })().compute(MAX_VERTS)
+
+    const fill = (src: typeof x, dst: typeof x) =>
+      Fn(() => {
+        const i = int(instanceIndex)
+        const ix = i.mod(uW)
+        const iy = i.div(uW)
+        const l = src.element(select(ix.greaterThan(0), i.sub(1), i)).xyz
+        const r = src.element(select(ix.lessThan(uW.sub(1)), i.add(1), i)).xyz
+        const u = src.element(select(iy.greaterThan(0), i.sub(uW), i)).xyz
+        const d = src.element(select(iy.lessThan(uH.sub(1)), i.add(uW), i)).xyz
+        const inside = meta.element(i).y.greaterThan(0.5)
+        dst.element(i).assign(vec4(select(inside, l.add(r).add(u).add(d).mul(0.25), x.element(i).xyz), 0))
+      })().compute(MAX_VERTS)
+    this.backFill = [fill(this.back, this.back2), fill(this.back2, this.back)]
 
     this.kernels = [bubbles, predict, solvePQ, finalize]
     this.solveQP = solveQP
@@ -278,6 +315,14 @@ export class BubbleSim {
     write(this.p, positions)
     write(this.q, positions)
     write(this.v)
+    // The back film starts flat on the table under the whole sheet.
+    const flat = new Float32Array(n * 4)
+    for (let k = 0; k < n; k++) {
+      flat[k * 4] = sheet.rest[k * 4]
+      flat[k * 4 + 2] = sheet.rest[k * 4 + 2]
+    }
+    write(this.back, flat)
+    write(this.back2, flat)
     write(this.normal)
     write(this.rest, sheet.rest)
     write(this.restNormal, sheet.restNormal)
@@ -301,7 +346,7 @@ export class BubbleSim {
     this.uH.value = sheet.H
     // Dispatch only the live sheet; three bounds-checks each kernel against its count.
     this.kernels[0].count = Math.max(sheet.count, 1)
-    for (const k of [...this.kernels.slice(1), this.solveQP, this.normals]) k.count = n
+    for (const k of [...this.kernels.slice(1), this.solveQP, this.normals, ...this.backFill]) k.count = n
     this.uH2.value = sheet.h * sheet.h
   }
 
@@ -328,6 +373,7 @@ export class BubbleSim {
       list.push(finalize)
     }
     list.push(this.normals)
+    for (let k = 0; k < this.backIterations; k += 2) list.push(...this.backFill)
     renderer.compute(list)
   }
 }

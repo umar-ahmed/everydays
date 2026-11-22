@@ -2,7 +2,7 @@ import * as THREE from 'three/webgpu'
 import { PopSynth } from './audio.ts'
 import { FOV, TABLE_GAP, fitCamera } from './camera.ts'
 import { FilmLook } from './materials.ts'
-import { MAX_RENDER_VERTS, RenderSurface, renderIndex } from './render.ts'
+import { MAX_RENDER_VERTS, RenderSurface, backIndex, renderIndex } from './render.ts'
 import { LatticeGenerator, type Shape, type Tiling } from './generators/lattice.ts'
 import { buildSheetFromMap, layoutFor, type Sheet } from './sheet.ts'
 import { BubbleSim } from './sim.ts'
@@ -37,6 +37,8 @@ export type Params = SheetParams & {
   background: 'black' | 'dark gray'
   /** Camera: exposure, depth of field 0..1, focus on the pointer, bloom, grain, vignette. */
   exposure: number
+  /** Camera elevation in degrees; low values graze across the sheet. */
+  elevation: number
   dof: number
   focusFollows: boolean
   bloom: number
@@ -102,6 +104,8 @@ export class BubbleWrapApp {
   private envTimer = 0
   private focus = 20
   private mesh: THREE.Mesh | null = null
+  private backMesh: THREE.Mesh | null = null
+  private backGeometry = new THREE.BufferGeometry()
   private surface = new RenderSurface(this.sim)
   private look = new FilmLook(this.sim, this.surface)
 
@@ -168,8 +172,15 @@ export class BubbleWrapApp {
     this.fill.position.set(10, 3, 6)
     scene.add(this.key, this.rim, this.fill)
 
-    // Positions come from the render surface's storage buffer; this only sizes the vertex range.
-    this.geometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(MAX_RENDER_VERTS * 3), 3))
+    // Positions come from the render surface's storage buffers; this only sizes the vertex range.
+    const range = new THREE.Float32BufferAttribute(new Float32Array(MAX_RENDER_VERTS * 3), 3)
+    this.geometry.setAttribute('position', range)
+    this.backGeometry.setAttribute('position', range)
+    // The flat back film the domes are sealed onto, drawn under the footprints.
+    const backMesh = new THREE.Mesh(this.backGeometry, this.look.back.film)
+    backMesh.frustumCulled = false
+    scene.add(backMesh)
+    this.backMesh = backMesh
     const mesh = new THREE.Mesh(this.geometry, this.look.film)
     mesh.frustumCulled = false
     mesh.renderOrder = 1
@@ -248,6 +259,9 @@ export class BubbleWrapApp {
     const index = renderIndex(RW, RH)
     this.geometry.setIndex(new THREE.BufferAttribute(index, 1))
     this.geometry.setDrawRange(0, index.length)
+    const back = backIndex(this.sheet, detail)
+    this.backGeometry.setIndex(new THREE.BufferAttribute(back, 1))
+    this.backGeometry.setDrawRange(0, back.length)
   }
 
   private apply(p: Params) {
@@ -265,6 +279,8 @@ export class BubbleWrapApp {
     if (this.table) this.table.visible = !field
     this.scene.background = new THREE.Color(field ? 0x000000 : 0x1d1e21)
     look.caustics.value = field ? 0 : p.keyStrip / 3
+    // Roughly the lit table's radiance, which the opaque back film shows in its place.
+    look.backdrop.value = field ? 0 : 2.2 * p.keyStrip
     look.texture.value = ['none', 'grid', 'dots'].indexOf(p.texture)
     look.textureScale.value = p.textureScale
     look.textureDepth.value = p.textureDepth
@@ -304,6 +320,8 @@ export class BubbleWrapApp {
     if (this.mesh) {
       const views = { shaded: look.film, normals: look.normals, wireframe: look.wireframe, map: look.mapView }
       this.mesh.material = views[p.view]
+      const backViews = { shaded: look.back.film, normals: look.back.normals, wireframe: look.back.wireframe, map: look.back.mapView }
+      if (this.backMesh) this.backMesh.material = backViews[p.view]
     }
   }
 
@@ -316,7 +334,7 @@ export class BubbleWrapApp {
   }
 
   private placeCamera(t: number) {
-    const fit = fitCamera(this.sheet.width, this.sheet.depth, this.camera.aspect)
+    const fit = fitCamera(this.sheet.width, this.sheet.depth, this.camera.aspect, this.params.elevation)
     if (this.camera.near !== fit.near || this.camera.far !== fit.far) {
       this.camera.near = fit.near
       this.camera.far = fit.far

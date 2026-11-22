@@ -2,9 +2,9 @@
 // bubble map, the sheet is built from its readback, and every invariant is checked.
 import { instancedArray } from 'three/tsl'
 import * as THREE from 'three/webgpu'
-import { TABLE_GAP, depthStep, fitCamera } from '../../src/days/002/camera.ts'
+import { ELEVATION, ELEVATIONS, MIN_GAP, depthStep, fitCamera } from '../../src/days/002/camera.ts'
 import { LatticeGenerator, SHAPES, TILINGS } from '../../src/days/002/generators/lattice.ts'
-import { DETAILS, MAX_DETAIL, MAX_RENDER_VERTS, renderSize } from '../../src/days/002/render.ts'
+import { DETAILS, MAX_DETAIL, MAX_RENDER_VERTS, backIndex, renderSize } from '../../src/days/002/render.ts'
 import { MAX_BUBBLES, MAX_MAP, MAX_QUADS, MAX_VERTS, buildSheetFromMap, layoutFor } from '../../src/days/002/sheet.ts'
 
 const GRID = [4, 11, 20]
@@ -29,6 +29,7 @@ async function run(): Promise<Result> {
     failures.push(`render storage buffers ${storageBytes} B > maxStorageBufferBindingSize ${limits.maxStorageBufferBindingSize}`)
   }
   let worstRender = { verts: 0, indexBytes: 0 }
+  let worstBack = 0
   let configs = 0
   let worstDepth = 0
   let minGapRatio = Infinity
@@ -113,6 +114,16 @@ async function run(): Promise<Result> {
               if (rVerts > MAX_RENDER_VERTS) fail(`${detail}x render surface ${rVerts} vertices > ${MAX_RENDER_VERTS}`)
               if (indexBytes > limits.maxBufferSize) fail(`${detail}x index buffer ${indexBytes} B > maxBufferSize`)
               if (detail === MAX_DETAIL && rVerts > worstRender.verts) worstRender = { verts: rVerts, indexBytes }
+              // The back film shares the render vertex range; its index covers footprints + seal band.
+              if (detail === MAX_DETAIL && cols === 20 && size === 2.2) {
+                const back = backIndex(sheet, detail)
+                let maxBack = 0
+                for (const v of back) maxBack = Math.max(maxBack, v)
+                if (back.length === 0) fail('back film index is empty')
+                if (maxBack >= rVerts) fail(`back film index ${maxBack} >= ${rVerts} render vertices`)
+                if (back.length * 4 > limits.maxBufferSize) fail('back film index exceeds maxBufferSize')
+                worstBack = Math.max(worstBack, back.length * 4)
+              }
             }
 
             // Rest normals.
@@ -125,8 +136,8 @@ async function run(): Promise<Result> {
             if (badNormals) fail(`${badNormals} rest normals NaN, non-unit or facing down`)
 
             // Depth precision: the film must stay resolvable above the table everywhere in view.
-            for (const aspect of ASPECTS) {
-              const fit = fitCamera(sheet.width, sheet.depth, aspect)
+            for (const [aspect, elevation] of ASPECTS.flatMap((a) => [ELEVATION, ...ELEVATIONS].map((e) => [a, e] as const))) {
+              const fit = fitCamera(sheet.width, sheet.depth, aspect, elevation)
               const cam = [0, Math.sin(fit.elevation) * fit.dist, Math.cos(fit.elevation) * fit.dist]
               const fwd = [fit.target[0] - cam[0], fit.target[1] - cam[1], fit.target[2] - cam[2]]
               const fl = Math.hypot(fwd[0], fwd[1], fwd[2])
@@ -140,10 +151,12 @@ async function run(): Promise<Result> {
                   zMax = Math.max(zMax, z)
                 }
               }
-              if (zMin <= fit.near) fail(`aspect ${aspect}: sheet inside the near plane`)
-              const ratio = (depthStep(zMax * 1.1, fit.near, fit.far) * DEPTH_MARGIN) / TABLE_GAP
+              if (zMin <= fit.near) fail(`aspect ${aspect} elevation ${elevation}: sheet inside the near plane`)
+              if (zMax * 1.1 >= fit.far) fail(`aspect ${aspect} elevation ${elevation}: sheet beyond the far plane`)
+              // The tightest separations: cap/back film at the seal band, and back film/table.
+              const ratio = (depthStep(zMax * 1.1, fit.near, fit.far) * DEPTH_MARGIN) / MIN_GAP
               worstDepth = Math.max(worstDepth, ratio)
-              if (ratio >= 1) fail(`aspect ${aspect}: depth buffer too coarse for the film/table gap`)
+              if (ratio >= 1) fail(`aspect ${aspect} elevation ${elevation}: depth buffer too coarse for the ${MIN_GAP} cm layer gap`)
             }
           }
         }
@@ -161,7 +174,7 @@ async function run(): Promise<Result> {
       'bubbles hexagonal grid=20': range('hexagonal grid=20'),
       'nearest-neighbour / pitch (min)': minGapRatio.toFixed(4),
       'tightest depth margin': `${(DEPTH_MARGIN / worstDepth).toFixed(0)}x`,
-      'render 4x max': `${worstRender.verts} / ${MAX_RENDER_VERTS} vertices, index ${(worstRender.indexBytes / 2 ** 20).toFixed(1)} MiB, storage ${(storageBytes / 2 ** 20).toFixed(1)} MiB per buffer`,
+      'render 4x max': `${worstRender.verts} / ${MAX_RENDER_VERTS} vertices, index ${(worstRender.indexBytes / 2 ** 20).toFixed(1)} MiB, storage ${(storageBytes / 2 ** 20).toFixed(1)} MiB per buffer (6 buffers incl. back film), back-film index up to ${(worstBack / 2 ** 20).toFixed(1)} MiB`,
     },
   }
 }

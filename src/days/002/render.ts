@@ -20,6 +20,7 @@ import {
   vec4,
 } from 'three/tsl'
 import type { ComputeNode, Node, WebGPURenderer } from 'three/webgpu'
+import { BACK_OFFSET } from './camera.ts'
 import { MAP_SCALE, MAX_H, MAX_W, type Sheet } from './sheet.ts'
 import type { BubbleSim } from './sim.ts'
 
@@ -49,6 +50,9 @@ export class RenderSurface {
   readonly rest = instancedArray(MAX_RENDER_VERTS, 'vec4')
   /** Bubble id (-1 for flat film), inside 0/1, signed distance (cm), unused. */
   readonly info = instancedArray(MAX_RENDER_VERTS, 'vec4')
+  /** The flat back film at render resolution (drawn only across footprints and a seal band). */
+  readonly backPos = instancedArray(MAX_RENDER_VERTS, 'vec4')
+  readonly backNormal = instancedArray(MAX_RENDER_VERTS, 'vec4')
 
   readonly detail = uniform(2, 'int')
   readonly RW = uniform(1, 'int')
@@ -61,6 +65,8 @@ export class RenderSurface {
   private readonly staticPass: ComputeNode
   private readonly surfacePass: ComputeNode
   private readonly normalPass: ComputeNode
+  private readonly backPass: ComputeNode
+  private readonly backNormalPass: ComputeNode
   private dirty = true
 
   constructor(sim: BubbleSim) {
@@ -110,46 +116,72 @@ export class RenderSurface {
       ]
     }
 
-    this.surfacePass = Fn(() => {
-      const i = int(instanceIndex)
-      const [rx, ry] = ixy(i)
-      const sx = float(rx).div(float(this.detail))
-      const sy = float(ry).div(float(this.detail))
-      const ix = int(floor(sx))
-      const iy = int(floor(sy))
-      const wx = weights(fract(sx))
-      const wy = weights(fract(sy))
-      const simIndex = (dx: number, dy: number) =>
-        iclamp(iy.add(dy), int(0), sim.uH.sub(1)).mul(sim.uW).add(iclamp(ix.add(dx), int(0), sim.uW.sub(1)))
-      const disp = vec3(0).toVar()
-      for (let dy = -1; dy <= 2; dy++) {
-        for (let dx = -1; dx <= 2; dx++) {
-          const j = simIndex(dx, dy)
-          disp.addAssign(sim.x.element(j).xyz.sub(sim.rest.element(j).xyz).mul(wx[dx + 1].mul(wy[dy + 1])))
+    // Rest shape plus the sim's displacement from its own rest pose, Catmull-Rom interpolated.
+    const surface = (
+      out: typeof pos,
+      restAt: (i: I) => Node<'vec3'>,
+      simPos: (j: I) => Node<'vec3'>,
+      simRest: (j: I) => Node<'vec3'>,
+      squeezeOf: ((j: I) => Node<'float'>) | null,
+    ) =>
+      Fn(() => {
+        const i = int(instanceIndex)
+        const [rx, ry] = ixy(i)
+        const sx = float(rx).div(float(this.detail))
+        const sy = float(ry).div(float(this.detail))
+        const ix = int(floor(sx))
+        const iy = int(floor(sy))
+        const wx = weights(fract(sx))
+        const wy = weights(fract(sy))
+        const simIndex = (dx: number, dy: number) =>
+          iclamp(iy.add(dy), int(0), sim.uH.sub(1)).mul(sim.uW).add(iclamp(ix.add(dx), int(0), sim.uW.sub(1)))
+        const disp = vec3(0).toVar()
+        for (let dy = -1; dy <= 2; dy++) {
+          for (let dx = -1; dx <= 2; dx++) {
+            const j = simIndex(dx, dy)
+            disp.addAssign(simPos(j).sub(simRest(j)).mul(wx[dx + 1].mul(wy[dy + 1])))
+          }
         }
-      }
-      // Compression for the wrinkle layer: bilinear over the containing sim quad.
-      const fx = fract(sx)
-      const fy = fract(sy)
-      const squeeze = mix(
-        mix(sim.normal.element(simIndex(0, 0)).w, sim.normal.element(simIndex(1, 0)).w, fx),
-        mix(sim.normal.element(simIndex(0, 1)).w, sim.normal.element(simIndex(1, 1)).w, fx),
-        fy,
-      )
-      const still = this.restPose.greaterThan(0.5)
-      pos.element(i).assign(vec4(rest.element(i).xyz.add(select(still, vec3(0), disp)), select(still, float(0), squeeze)))
-    })().compute(1)
+        // Compression for the wrinkle layer: bilinear over the containing sim quad.
+        const fx = fract(sx)
+        const fy = fract(sy)
+        const squeeze = squeezeOf
+          ? mix(mix(squeezeOf(simIndex(0, 0)), squeezeOf(simIndex(1, 0)), fx), mix(squeezeOf(simIndex(0, 1)), squeezeOf(simIndex(1, 1)), fx), fy)
+          : float(0)
+        const still = this.restPose.greaterThan(0.5)
+        out.element(i).assign(vec4(restAt(i).add(select(still, vec3(0), disp)), select(still, float(0), squeeze)))
+      })().compute(1)
 
-    this.normalPass = Fn(() => {
-      const i = int(instanceIndex)
-      const [rx, ry] = ixy(i)
-      const il = select(rx.greaterThan(0), i.sub(1), i)
-      const ir = select(rx.lessThan(this.RW.sub(1)), i.add(1), i)
-      const iu = select(ry.greaterThan(0), i.sub(this.RW), i)
-      const id = select(ry.lessThan(this.RH.sub(1)), i.add(this.RW), i)
-      const n = cross(pos.element(id).xyz.sub(pos.element(iu).xyz), pos.element(ir).xyz.sub(pos.element(il).xyz))
-      normal.element(i).assign(vec4(normalize(n), pos.element(i).w))
-    })().compute(1)
+    const normals = (src: typeof pos, dst: typeof pos) =>
+      Fn(() => {
+        const i = int(instanceIndex)
+        const [rx, ry] = ixy(i)
+        const il = select(rx.greaterThan(0), i.sub(1), i)
+        const ir = select(rx.lessThan(this.RW.sub(1)), i.add(1), i)
+        const iu = select(ry.greaterThan(0), i.sub(this.RW), i)
+        const id = select(ry.lessThan(this.RH.sub(1)), i.add(this.RW), i)
+        const n = cross(src.element(id).xyz.sub(src.element(iu).xyz), src.element(ir).xyz.sub(src.element(il).xyz))
+        dst.element(i).assign(vec4(normalize(n), src.element(i).w))
+      })().compute(1)
+
+    this.surfacePass = surface(
+      pos,
+      (i) => rest.element(i).xyz,
+      (j) => sim.x.element(j).xyz,
+      (j) => sim.rest.element(j).xyz,
+      (j) => sim.normal.element(j).w,
+    )
+    this.normalPass = normals(pos, normal)
+    // The back film's rest shape is flat; its sim counterpart is the harmonic-filled base.
+    const flat = (v: Node<'vec4'>) => vec3(v.x, 0, v.z)
+    this.backPass = surface(
+      this.backPos,
+      (i) => flat(rest.element(i)).sub(vec3(0, BACK_OFFSET, 0)),
+      (j) => sim.back.element(j).xyz,
+      (j) => flat(sim.rest.element(j)),
+      null,
+    )
+    this.backNormalPass = normals(this.backPos, this.backNormal)
   }
 
   /** Point at a sheet and detail level. Returns the render grid size for the index buffer. */
@@ -161,7 +193,7 @@ export class RenderSurface {
     this.h.value = sheet.h / detail
     // The soft foot is about one sim segment wide: enough to round the rim at render resolution.
     this.foot.value = sheet.h
-    for (const k of [this.staticPass, this.surfacePass, this.normalPass]) k.count = RW * RH
+    for (const k of [this.staticPass, this.surfacePass, this.normalPass, this.backPass, this.backNormalPass]) k.count = RW * RH
     this.dirty = true
     return { RW, RH }
   }
@@ -171,7 +203,7 @@ export class RenderSurface {
       renderer.compute(this.staticPass)
       this.dirty = false
     }
-    renderer.compute([this.surfacePass, this.normalPass])
+    renderer.compute([this.surfacePass, this.normalPass, this.backPass, this.backNormalPass])
   }
 }
 
@@ -191,4 +223,40 @@ export function renderIndex(RW: number, RH: number) {
     }
   }
   return index
+}
+
+/**
+ * Triangles for the back film: only render quads whose corners come within a seal band of a
+ * bubble footprint. Elsewhere the two films are bonded and the cap layer stands for both.
+ */
+export function backIndex(sheet: Sheet, detail: number) {
+  const { RW, RH } = renderSize(sheet.W, sheet.H, detail)
+  const band = sheet.h * 0.75
+  const sd = new Float32Array(RW * RH)
+  for (let ry = 0; ry < RH; ry++) {
+    for (let rx = 0; rx < RW; rx++) {
+      const mx = (rx * MAP_SCALE) / detail
+      const my = (ry * MAP_SCALE) / detail
+      const tx = Math.floor(mx)
+      const ty = Math.floor(my)
+      const fx = mx - tx
+      const fy = my - ty
+      const at = (dx: number, dy: number) =>
+        sheet.map[(Math.min(ty + dy, sheet.mapH - 1) * sheet.mapW + Math.min(tx + dx, sheet.mapW - 1)) * 4 + 1]
+      sd[ry * RW + rx] = (at(0, 0) * (1 - fx) + at(1, 0) * fx) * (1 - fy) + (at(0, 1) * (1 - fx) + at(1, 1) * fx) * fy
+    }
+  }
+  const out: number[] = []
+  for (let y = 0; y < RH - 1; y++) {
+    for (let x = 0; x < RW - 1; x++) {
+      const a = y * RW + x
+      const b = a + 1
+      const c = a + RW + 1
+      const d = a + RW
+      if (Math.min(sd[a], sd[b], sd[c], sd[d]) > band) continue
+      if ((x + y) % 2 === 0) out.push(a, d, c, a, c, b)
+      else out.push(a, d, b, b, d, c)
+    }
+  }
+  return new Uint32Array(out)
 }

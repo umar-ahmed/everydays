@@ -74,6 +74,10 @@ export class FilmLook {
   readonly contour = uniform(0.1)
 
   readonly film: THREE.MeshPhysicalNodeMaterial
+  /** The flat back film's materials, one per view. */
+  readonly back: { film: THREE.MeshPhysicalNodeMaterial; normals: THREE.MeshBasicNodeMaterial; wireframe: THREE.MeshBasicNodeMaterial; mapView: THREE.MeshBasicNodeMaterial }
+  /** How bright the backdrop behind the back film is (0 on black; it stands in for the table). */
+  readonly backdrop = uniform(0)
   readonly table: THREE.MeshStandardNodeMaterial
   /** Debug views: world normals as colour, and the triangle wireframe. */
   readonly normals: THREE.MeshBasicNodeMaterial
@@ -87,15 +91,20 @@ export class FilmLook {
 
   constructor(sim: BubbleSim, surface: RenderSurface) {
     this.surface = surface
-    this.film = this.makeFilm(sim)
+    const cap: Layer = { pos: surface.pos, normal: surface.normal, back: false }
+    const base: Layer = { pos: surface.backPos, normal: surface.backNormal, back: true }
+    this.film = this.makeFilm(sim, cap)
     this.table = this.makeTable(sim)
-    const position = this.position(sim)
-    this.normals = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide })
-    this.normals.positionNode = position
-    this.normals.colorNode = normalize(varying(this.normal(sim).xyz)).mul(0.5).add(0.5)
-    this.wireframe = new THREE.MeshBasicNodeMaterial({ color: 0xd8dce2, wireframe: true })
-    this.wireframe.positionNode = position
-    this.mapView = this.makeMapView(sim)
+    const views = (layer: Layer) => {
+      const normals = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide })
+      normals.positionNode = this.position(layer)
+      normals.colorNode = normalize(varying(this.normal(layer).xyz)).mul(0.5).add(0.5)
+      const wireframe = new THREE.MeshBasicNodeMaterial({ color: layer.back ? 0x7d8590 : 0xd8dce2, wireframe: true })
+      wireframe.positionNode = this.position(layer)
+      return { normals, wireframe, mapView: this.makeMapView(sim, layer) }
+    }
+    ;({ normals: this.normals, wireframe: this.wireframe, mapView: this.mapView } = views(cap))
+    this.back = { film: this.makeFilm(sim, base), ...views(base) }
   }
 
   private live() {
@@ -103,13 +112,13 @@ export class FilmLook {
   }
 
   // The render surface already folds rest pose in (no sim displacement), so every view reads it.
-  private position(_sim: BubbleSim) {
-    return this.surface.pos.element(vertexIndex).xyz
+  private position(layer: Layer) {
+    return layer.pos.element(vertexIndex).xyz
   }
 
   /** xyz normal, w compression (0 in rest pose). */
-  private normal(_sim: BubbleSim) {
-    return this.surface.normal.element(vertexIndex)
+  private normal(layer: Layer) {
+    return layer.normal.element(vertexIndex)
   }
 
   /**
@@ -118,7 +127,8 @@ export class FilmLook {
    * iridescence (three's built-in model) kept subtle by default, plus a procedural crease
    * layer for the wrinkles finer than the sim mesh.
    */
-  private makeFilm(sim: BubbleSim) {
+  private makeFilm(sim: BubbleSim, layer: Layer) {
+    const back = layer.back
     const film = new THREE.MeshPhysicalNodeMaterial({
       color: 0xffffff,
       metalness: 0,
@@ -130,14 +140,15 @@ export class FilmLook {
       attenuationColor: new THREE.Color(0xeef1f4),
       attenuationDistance: 3,
     })
-    film.positionNode = this.position(sim)
-    const n = varying(this.normal(sim))
+    film.positionNode = this.position(layer)
+    const n = varying(this.normal(layer))
     const info = this.surface.info.element(vertexIndex)
-    const dome = varying(this.surface.rest.element(vertexIndex).w)
+    // The back film is flat everywhere it's drawn: no dome, no squeeze, no pops of its own.
+    const dome = back ? float(0) : varying(this.surface.rest.element(vertexIndex).w)
     const inside = varying(info.y)
     const restXZ = varying(this.surface.rest.element(vertexIndex).xz)
     const bubble = int(max(info.x, 0))
-    const popped = varying(select(this.live().and(info.x.greaterThanEqual(0)), sim.pops.element(bubble).x, float(0)))
+    const popped = back ? float(0) : varying(select(this.live().and(info.x.greaterThanEqual(0)), sim.pops.element(bubble).x, float(0)))
 
     // Creases: anisotropic ridged noise whose direction drifts across the film.
     const sharp = mix(float(1.5), float(9), this.sharpness)
@@ -165,7 +176,7 @@ export class FilmLook {
     const h0 = crease(restXZ)
     const hu = crease(restXZ.add(vec2(eps, 0)))
     const hv = crease(restXZ.add(vec2(0, eps)))
-    const amp = this.wrinkle.mul(mask).mul(resolved).mul(0.006)
+    const amp = back ? float(0) : this.wrinkle.mul(mask).mul(resolved).mul(0.006)
     const wrinkleGrad = vec2(hu.sub(h0), hv.sub(h0)).div(eps).mul(amp)
 
     // Embossed texture in dome-local coordinates (rest position minus the bubble's map center),
@@ -177,7 +188,7 @@ export class FilmLook {
     const cycles = fwidth(local.x).add(fwidth(local.y)).mul(freq)
     const k = mix(float(2), float(24), this.textureSharpness)
     const texFade = smoothstep(0.45, 0.12, cycles.mul(this.textureSharpness.mul(1.5).add(1)))
-    const texMask = mix(float(0.25), float(1), inside).mul(texFade).mul(this.textureDepth)
+    const texMask = back ? float(0) : mix(float(0.25), float(1), inside).mul(texFade).mul(this.textureDepth)
     // Crosshatch ridges: r(t) = (0.5 + 0.5 cos 2 pi f t)^k along each axis.
     const ridge = (t: Node<'float'>) => {
       const c = cos(t.mul(freq).mul(2 * Math.PI)).mul(0.5).add(0.5)
@@ -250,10 +261,12 @@ export class FilmLook {
       creaseLines = creaseLines.add(f.z.mul(weight).mul(fade))
     }
     // Tension smooths taut domes; the flat film crumples most, collapsed and squeezed film far more.
-    const crumpleMask = mix(oneMinus(this.crumpleBalance), float(1), oneMinus(inside))
-      .add(popped.mul(inside).mul(1.6))
-      .add(smoothstep(0.03, 0.2, n.w))
-      .mul(this.crumple)
+    const crumpleMask = back
+      ? this.crumple.mul(0.4)
+      : mix(oneMinus(this.crumpleBalance), float(1), oneMinus(inside))
+          .add(popped.mul(inside).mul(1.6))
+          .add(smoothstep(0.03, 0.2, n.w))
+          .mul(this.crumple)
     const grad = wrinkleGrad
       .add(select(isGrid, gridGrad, select(isDots, dotsGrad, vec2(0))))
       .add(crumpleGrad.mul(crumpleMask).mul(1.3))
@@ -275,17 +288,27 @@ export class FilmLook {
     )
     // Beer-Lambert: transmittance exp(-sigma L), with the path length L growing at grazing angles;
     // overlapping layers multiply on their own. Clear film has sigma = 0.
-    const sigma = log(max(this.tint, vec3(0.01))).negate().mul(this.density)
+    // Outside the footprints the cap layer stands for both bonded films, so it absorbs twice.
+    const layers = back ? float(1) : mix(float(2), float(1), inside)
+    const sigma = log(max(this.tint, vec3(0.01))).negate().mul(this.density).mul(layers)
     const view = normalize(cameraPosition.sub(positionWorld))
     const path = float(1).div(max(abs(dot(bent, view)), 0.15))
     const transmittance = exp(sigma.mul(path).negate())
-    film.colorNode = transmittance
     // A thin film reflects off its back surface too, and that light crosses the film twice: so
     // half the specular carries the tint squared. On black this is where the colour shows.
     film.specularColorNode = mix(vec3(1), transmittance.mul(transmittance), 0.5)
-    // Clear PE scatters almost nothing diffusely: on black, any diffuse share turns the film gray.
-    film.transmissionNode = float(1)
-    film.thicknessNode = dome.mul(this.lens).mul(oneMinus(popped.mul(0.8)))
+    if (back) {
+      // Opaque, so the caps' transmission pass can see (and refract, and tint) it. A clear film
+      // on black is its reflections alone; over the dark-gray table it shows the table through.
+      film.colorNode = vec3(0)
+      film.emissiveNode = sweepAt(positionWorld.xz).mul(transmittance).mul(this.backdrop)
+      film.transmissionNode = float(0)
+    } else {
+      film.colorNode = transmittance
+      // Clear PE scatters almost nothing diffusely: on black, any diffuse share turns the film gray.
+      film.transmissionNode = float(1)
+      film.thicknessNode = dome.mul(this.lens).mul(oneMinus(popped.mul(0.8)))
+    }
     film.iridescenceNode = this.iridescence
     // Thermoforming stretches the domes thinner than the flat base; noise breaks up the bands.
     const wobble = mx_noise_float(vec3(restXZ.mul(0.9), 0.3)).mul(0.18).add(1)
@@ -297,8 +320,7 @@ export class FilmLook {
   private makeTable(sim: BubbleSim) {
     const table = new THREE.MeshStandardNodeMaterial({ roughness: 0.92, metalness: 0 })
     const p = positionWorld.xz
-    // Linear values: a lit centre around 18% gray falling to a near-black backdrop.
-    const sweep = mix(vec3(0.016, 0.0165, 0.018), vec3(0.004, 0.0042, 0.0048), smoothstep(3, 22, length(p)))
+    const sweep = sweepAt(p)
     const { onSheet, id } = mapAt(sim, p)
     const bubble = onSheet.and(id.greaterThanEqual(0))
     const b = select(bubble, id, int(0))
@@ -315,9 +337,9 @@ export class FilmLook {
   }
 
   /** Debug view of the map: a colour per bubble id, distance contours, white rims, red overlaps. */
-  private makeMapView(sim: BubbleSim) {
+  private makeMapView(sim: BubbleSim, layer: Layer) {
     const view = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide })
-    view.positionNode = this.position(sim)
+    view.positionNode = this.position(layer)
     const { texel, id } = mapAt(sim, varying(this.surface.rest.element(vertexIndex).xz))
     const sd = texel.y
     const k = float(id)
@@ -329,6 +351,13 @@ export class FilmLook {
     view.colorNode = select(texel.w.greaterThan(1.5), vec3(1, 0.1, 0.1), mix(base, vec3(1), rim))
     return view
   }
+}
+
+type Layer = { pos: RenderSurface['pos']; normal: RenderSurface['normal']; back: boolean }
+
+/** The dark-gray studio sweep (linear): a lit centre around 18% gray falling to near-black. */
+function sweepAt(p: Node<'vec2'>) {
+  return mix(vec3(0.016, 0.0165, 0.018), vec3(0.004, 0.0042, 0.0048), smoothstep(3, 22, length(p)))
 }
 
 /** Nearest map texel for a sheet-space xz position. */

@@ -55,6 +55,7 @@ const dialConfig = {
   },
   camera: {
     exposure: [1, 0.2, 3, 0.01],
+    elevation: [56, 12, 85, 1],
     'dof amount': [0.35, 0, 1, 0.01],
     'focus follows pointer': true,
     bloom: [0.3, 0, 2, 0.01],
@@ -112,6 +113,7 @@ export function BubbleWrap() {
     lightRotation: v.studio['light rotation'],
     background: v.studio.background as Params['background'],
     exposure: v.camera.exposure,
+    elevation: v.camera.elevation,
     dof: v.camera['dof amount'],
     focusFollows: v.camera['focus follows pointer'],
     bloom: v.camera.bloom,
