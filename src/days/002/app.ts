@@ -1,6 +1,7 @@
 import * as THREE from 'three/webgpu'
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import { PopSynth } from './audio.ts'
+import { FOV, TABLE_GAP, fitCamera } from './camera.ts'
 import { FilmLook } from './materials.ts'
 import { buildSheet, MAX_VERTS, type Sheet, type SheetConfig } from './sheet.ts'
 import type { Shape } from './shapes.ts'
@@ -51,7 +52,7 @@ export class BubbleWrapApp {
   readonly synth = new PopSynth()
   private renderer: THREE.WebGPURenderer
   private scene = new THREE.Scene()
-  private camera = new THREE.PerspectiveCamera(30, 1, 0.1, 500)
+  private camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 500)
   private sim = new BubbleSim()
   private geometry = new THREE.BufferGeometry()
   private sheet: Sheet
@@ -115,8 +116,10 @@ export class BubbleWrapApp {
     const pmrem = new THREE.PMREMGenerator(this.renderer)
     scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
 
-    const table = new THREE.Mesh(new THREE.PlaneGeometry(600, 600).rotateX(-Math.PI / 2), this.look.table)
-    table.position.y = -0.004
+    // Subdivided so no single triangle reaches far behind the camera and gets clipped by the
+    // near plane, which costs the clipped triangle depth interpolation precision.
+    const table = new THREE.Mesh(new THREE.PlaneGeometry(600, 600, 60, 60).rotateX(-Math.PI / 2), this.look.table)
+    table.position.y = -TABLE_GAP
     scene.add(table)
 
     this.key.position.set(-7, 14, 9)
@@ -210,17 +213,18 @@ export class BubbleWrapApp {
   }
 
   private placeCamera(t: number) {
-    const { width, depth } = this.sheet
-    const elevation = THREE.MathUtils.degToRad(56)
-    const vfov = THREE.MathUtils.degToRad(this.camera.fov)
-    const hfov = 2 * Math.atan(Math.tan(vfov / 2) * this.camera.aspect)
-    // Leave room for the bottom chrome; the receding far edge needs less height than the near edge.
-    const dist = Math.max((width * 0.58) / Math.tan(hfov / 2), (depth * 0.5) / Math.tan(vfov / 2)) * 1.05
+    const fit = fitCamera(this.sheet.width, this.sheet.depth, this.camera.aspect)
+    if (this.camera.near !== fit.near || this.camera.far !== fit.far) {
+      this.camera.near = fit.near
+      this.camera.far = fit.far
+      this.camera.updateProjectionMatrix()
+    }
     const sway = this.params.reducedMotion ? 0 : 1
     const az = THREE.MathUtils.degToRad(2.2 * Math.sin(t * 0.21)) * sway
-    const el = elevation + THREE.MathUtils.degToRad(1.4 * Math.sin(t * 0.13)) * sway
+    const el = fit.elevation + THREE.MathUtils.degToRad(1.4 * Math.sin(t * 0.13)) * sway
+    const { dist } = fit
     this.camera.position.set(Math.sin(az) * Math.cos(el) * dist, Math.sin(el) * dist, Math.cos(az) * Math.cos(el) * dist)
-    this.camera.lookAt(0, 0, depth * 0.04)
+    this.camera.lookAt(...fit.target)
   }
 
   private onDown = (e: PointerEvent) => {
