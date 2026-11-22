@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "og": "node scripts/og.mjs"
+    "og": "node scripts/og.mjs",
+    "check": "node --experimental-strip-types --no-warnings scripts/check-002.ts"
   },
   "dependencies": {
     "dialkit": "^2.2.1",
