@@ -16,7 +16,8 @@ export const days: Day[] = [
   {
     slug: '002',
     title: 'bubble wrap',
-    concept: 'Physically based bubble wrap: an XPBD cloth with gas-filled domes on the GPU that pop, with synthesized sound, when you squeeze them.',
+    concept:
+      'Physically based bubble wrap: an XPBD cloth with gas-filled domes on the GPU that pop, with synthesized sound, when you squeeze them.',
     date: '2026-11-22',
   },
 ]

@@ -57,7 +57,9 @@ async function run(): Promise<Result> {
   const limits = (renderer.backend as unknown as { device: GPUDevice }).device.limits
   const storageBytes = MAX_RENDER_VERTS * 16
   if (storageBytes > limits.maxStorageBufferBindingSize) {
-    failures.push(`render storage buffers ${storageBytes} B > maxStorageBufferBindingSize ${limits.maxStorageBufferBindingSize}`)
+    failures.push(
+      `render storage buffers ${storageBytes} B > maxStorageBufferBindingSize ${limits.maxStorageBufferBindingSize}`,
+    )
   }
   let worstRender = { verts: 0, indexBytes: 0 }
   let worstBack = 0
@@ -71,7 +73,8 @@ async function run(): Promise<Result> {
     const view: View = { width: vp.width, height: vp.height }
     const aspect = sheetAspect(view)
     const portrait = vp.height > vp.width
-    if (portrait ? aspect >= 1 : aspect <= 1) failures.push(`${vp.name}: sheet aspect ${aspect.toFixed(2)} doesn't follow the screen`)
+    if (portrait ? aspect >= 1 : aspect <= 1)
+      failures.push(`${vp.name}: sheet aspect ${aspect.toFixed(2)} doesn't follow the screen`)
     for (const tiling of TILINGS) {
       const lattice = latticeFor(tiling)
       for (const shape of SHAPES) {
@@ -97,7 +100,8 @@ async function run(): Promise<Result> {
               if (sheet.count < 1) fail('no bubbles')
               if (sheet.count > MAX_BUBBLES) fail(`${sheet.count} bubbles > ${MAX_BUBBLES}`)
               if (sheet.count > vp.budget.bubbles) fail(`${sheet.count} bubbles > budget ${vp.budget.bubbles}`)
-              if (sheet.count !== layout.sites) fail(`${sheet.count} bubbles in the map, layout planned ${layout.sites}`)
+              if (sheet.count !== layout.sites)
+                fail(`${sheet.count} bubbles in the map, layout planned ${layout.sites}`)
               if (sheet.quadList.length > MAX_QUADS) fail(`${sheet.quadList.length} listed quads > ${MAX_QUADS}`)
               let maxIndex = 0
               for (const i of sheet.index) maxIndex = Math.max(maxIndex, i)
@@ -137,7 +141,10 @@ async function run(): Promise<Result> {
               let nearest = Infinity
               for (let a = 0; a < sheet.count; a++) {
                 for (let b = a + 1; b < sheet.count; b++) {
-                  const d = Math.hypot(sheet.centers[a * 4] - sheet.centers[b * 4], sheet.centers[a * 4 + 1] - sheet.centers[b * 4 + 1])
+                  const d = Math.hypot(
+                    sheet.centers[a * 4] - sheet.centers[b * 4],
+                    sheet.centers[a * 4 + 1] - sheet.centers[b * 4 + 1],
+                  )
                   nearest = Math.min(nearest, d)
                 }
               }
@@ -145,7 +152,8 @@ async function run(): Promise<Result> {
               if (sheet.count > 1) {
                 const error = Math.abs(nearest - layout.pitch) / layout.texel
                 minGapRatio = Math.min(minGapRatio, nearest / layout.pitch)
-                if (error > 1.5) fail(`nearest neighbours ${nearest.toFixed(3)} cm apart, pitch ${layout.pitch.toFixed(3)}`)
+                if (error > 1.5)
+                  fail(`nearest neighbours ${nearest.toFixed(3)} cm apart, pitch ${layout.pitch.toFixed(3)}`)
               }
 
               // Render surface at every detail level, including the 4x maximum.
@@ -153,7 +161,8 @@ async function run(): Promise<Result> {
                 const { RW, RH } = renderSize(sheet.W, sheet.H, detail)
                 const rVerts = RW * RH
                 const indexBytes = (RW - 1) * (RH - 1) * 6 * 4
-                if (rVerts > MAX_RENDER_VERTS) fail(`${detail}x render surface ${rVerts} vertices > ${MAX_RENDER_VERTS}`)
+                if (rVerts > MAX_RENDER_VERTS)
+                  fail(`${detail}x render surface ${rVerts} vertices > ${MAX_RENDER_VERTS}`)
                 if (indexBytes > limits.maxBufferSize) fail(`${detail}x index buffer ${indexBytes} B > maxBufferSize`)
                 if (detail === MAX_DETAIL && rVerts > worstRender.verts) worstRender = { verts: rVerts, indexBytes }
                 // The back film shares the render vertex range; its index covers footprints + seal band.
@@ -202,7 +211,13 @@ async function run(): Promise<Result> {
                 // corners, orbited and tilted to the limits.
                 const range = zoomRange(fit, sheet.size, sheet.domeHeight, view)
                 const candidates: Pose[] = [fit]
-                for (const [px, pz] of [[0, 0], [-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+                for (const [px, pz] of [
+                  [0, 0],
+                  [-1, -1],
+                  [1, -1],
+                  [-1, 1],
+                  [1, 1],
+                ]) {
                   for (const az of [0, -70, 70]) {
                     for (const el of [elevation, 12, 85]) {
                       const e = (el * Math.PI) / 180
@@ -238,7 +253,8 @@ async function run(): Promise<Result> {
                     }
                   }
                   if (!Number.isFinite(zMin)) continue
-                  if (zMin <= near) fail(`${tag}: sheet inside the near plane (${zMin.toFixed(3)} <= ${near.toFixed(3)})`)
+                  if (zMin <= near)
+                    fail(`${tag}: sheet inside the near plane (${zMin.toFixed(3)} <= ${near.toFixed(3)})`)
                   if (zMax >= far) fail(`${tag}: sheet beyond the far plane`)
                   // The tightest separations: cap/back film at the seal band, and back film/table.
                   const ratio = (depthStep(zMax * 1.1, near, far) * DEPTH_MARGIN) / MIN_GAP

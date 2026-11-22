@@ -54,9 +54,7 @@ export function Index() {
         </li>
       </ol>
 
-      <footer className="mt-auto pt-16 font-mono text-xs text-white/30">
-        one toy a day · ~30 minutes each
-      </footer>
+      <footer className="mt-auto pt-16 font-mono text-xs text-white/30">one toy a day · ~30 minutes each</footer>
     </main>
   )
 }

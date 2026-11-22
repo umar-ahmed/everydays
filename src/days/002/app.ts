@@ -1,6 +1,16 @@
 import * as THREE from 'three/webgpu'
 import { PopSynth } from './audio.ts'
-import { FOV, TABLE_GAP, type CameraFit, type View, cameraPosition, clipPlanes, fitView, sheetAspect, viewDepth } from './camera.ts'
+import {
+  FOV,
+  TABLE_GAP,
+  type CameraFit,
+  type View,
+  cameraPosition,
+  clipPlanes,
+  fitView,
+  sheetAspect,
+  viewDepth,
+} from './camera.ts'
 import { FilmLook } from './materials.ts'
 import { MAX_RENDER_VERTS, RenderSurface, backIndex, renderIndex } from './render.ts'
 import { LatticeGenerator, latticeFor, type Shape, type Tiling } from './generators/lattice.ts'
@@ -145,7 +155,9 @@ export class BubbleWrapApp {
   private viewMoved = false
   /** Phones (coarse pointer, small screen) get a smaller cloth and bubble budget. */
   private budget =
-    window.matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 600 ? PHONE_BUDGET : FULL_BUDGET
+    window.matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 600
+      ? PHONE_BUDGET
+      : FULL_BUDGET
 
   private container: HTMLElement
   private onStats: (s: Stats) => void
@@ -362,7 +374,12 @@ export class BubbleWrapApp {
     if (this.mesh) {
       const views = { shaded: look.film, normals: look.normals, wireframe: look.wireframe, map: look.mapView }
       this.mesh.material = views[p.view]
-      const backViews = { shaded: look.back.film, normals: look.back.normals, wireframe: look.back.wireframe, map: look.back.mapView }
+      const backViews = {
+        shaded: look.back.film,
+        normals: look.back.normals,
+        wireframe: look.back.wireframe,
+        map: look.back.mapView,
+      }
       if (this.backMesh) this.backMesh.material = backViews[p.view]
     }
   }

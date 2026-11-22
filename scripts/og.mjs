@@ -96,20 +96,37 @@ async function day002() {
   await page.addStyleTag({ content: '.dialkit-root,[data-chrome]{display:none!important}' })
   const popped = () => page.evaluate(() => window.bubblewrap.seen.reduce((a, b) => a + b, 0))
   // Pop a loose scatter so the card shows intact and collapsed domes side by side.
-  for (const [fx, fz] of [[0.32, 0.3], [0.42, 0.45], [0.66, 0.56], [0.74, 0.3], [0.22, 0.68], [0.56, 0.8]]) {
-    const at = await page.evaluate(([fx, fz, w, h]) => {
-      const a = window.bubblewrap
-      const s = a.sheet
-      // Nearest bubble (from the map-derived centers) to a fraction of the sheet.
-      const x = (fx - 0.5) * s.width
-      const z = (fz - 0.5) * s.depth
-      let best = 0
-      for (let b = 1; b < s.count; b++) {
-        if (Math.hypot(s.centers[b * 4] - x, s.centers[b * 4 + 1] - z) < Math.hypot(s.centers[best * 4] - x, s.centers[best * 4 + 1] - z)) best = b
-      }
-      const p = a.hit.clone().set(s.centers[best * 4], s.domeHeight, s.centers[best * 4 + 1]).project(a.camera)
-      return [((p.x + 1) / 2) * w, ((1 - p.y) / 2) * h]
-    }, [fx, fz, size.width, size.height])
+  for (const [fx, fz] of [
+    [0.32, 0.3],
+    [0.42, 0.45],
+    [0.66, 0.56],
+    [0.74, 0.3],
+    [0.22, 0.68],
+    [0.56, 0.8],
+  ]) {
+    const at = await page.evaluate(
+      ([fx, fz, w, h]) => {
+        const a = window.bubblewrap
+        const s = a.sheet
+        // Nearest bubble (from the map-derived centers) to a fraction of the sheet.
+        const x = (fx - 0.5) * s.width
+        const z = (fz - 0.5) * s.depth
+        let best = 0
+        for (let b = 1; b < s.count; b++) {
+          if (
+            Math.hypot(s.centers[b * 4] - x, s.centers[b * 4 + 1] - z) <
+            Math.hypot(s.centers[best * 4] - x, s.centers[best * 4 + 1] - z)
+          )
+            best = b
+        }
+        const p = a.hit
+          .clone()
+          .set(s.centers[best * 4], s.domeHeight, s.centers[best * 4 + 1])
+          .project(a.camera)
+        return [((p.x + 1) / 2) * w, ((1 - p.y) / 2) * h]
+      },
+      [fx, fz, size.width, size.height],
+    )
     const before = await popped()
     await page.mouse.move(at[0], at[1])
     await page.mouse.down()
@@ -129,4 +146,6 @@ if (want('index')) await indexCard()
 if (want('001')) await day001()
 if (want('002')) await day002()
 await browser.close()
-console.log(`wrote ${only ? [...only].join(', ') : 'index, 001, 002'} cards (day 001 frame ${pick}; frames in ${framesDir})`)
+console.log(
+  `wrote ${only ? [...only].join(', ') : 'index, 001, 002'} cards (day 001 frame ${pick}; frames in ${framesDir})`,
+)

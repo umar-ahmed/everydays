@@ -19,7 +19,10 @@ export function studioEnvironment(renderer: THREE.WebGPURenderer, { key, rim }: 
   const panel = (w: number, h: number, intensity: number, x: number, y: number, z: number) => {
     const m = new THREE.Mesh(
       new THREE.PlaneGeometry(w, h),
-      new THREE.MeshBasicMaterial({ color: new THREE.Color(1, 1, 1).multiplyScalar(intensity), side: THREE.DoubleSide }),
+      new THREE.MeshBasicMaterial({
+        color: new THREE.Color(1, 1, 1).multiplyScalar(intensity),
+        side: THREE.DoubleSide,
+      }),
     )
     m.position.set(x, y, z)
     m.lookAt(0, 0, 0)
@@ -91,7 +94,8 @@ export class StudioPipeline {
     this.shape = shape
     const scenePass = pass(this.scene, this.camera)
     let color: Node<'vec4'> = scenePass.getTextureNode('output')
-    if (look.dof > 0) color = dof(color, scenePass.getViewZNode(), this.focus, this.focalLength, this.bokeh) as unknown as Node<'vec4'>
+    if (look.dof > 0)
+      color = dof(color, scenePass.getViewZNode(), this.focus, this.focalLength, this.bokeh) as unknown as Node<'vec4'>
     if (look.bloom > 0) color = color.add(bloom(color, this.bloomStrength, 0.25, 0.9))
     const edge = smoothstep(0.85, 0.25, length(screenUV.sub(0.5)).mul(1.35))
     const vignetted = vec4(color.rgb.mul(mix(float(1), edge, this.vignette)), 1)

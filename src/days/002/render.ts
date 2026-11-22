@@ -83,7 +83,11 @@ export class RenderSurface {
       const fx = fract(mx)
       const fy = fract(my)
       const at = (dx: number, dy: number) =>
-        sim.map.element(imin(ty.add(dy), sim.mapH.sub(1)).mul(sim.mapW).add(imin(tx.add(dx), sim.mapW.sub(1))))
+        sim.map.element(
+          imin(ty.add(dy), sim.mapH.sub(1))
+            .mul(sim.mapW)
+            .add(imin(tx.add(dx), sim.mapW.sub(1))),
+        )
       const sd = mix(mix(at(0, 0).y, at(1, 0).y, fx), mix(at(0, 1).y, at(1, 1).y, fx), fy)
       const nx = imin(tx.add(int(fx.add(0.5))), sim.mapW.sub(1))
       const ny = imin(ty.add(int(fy.add(0.5))), sim.mapH.sub(1))
@@ -131,19 +135,29 @@ export class RenderSurface {
         const wx = weights(fract(sx))
         const wy = weights(fract(sy))
         const simIndex = (dx: number, dy: number) =>
-          iclamp(iy.add(dy), int(0), sim.uH.sub(1)).mul(sim.uW).add(iclamp(ix.add(dx), int(0), sim.uW.sub(1)))
+          iclamp(iy.add(dy), int(0), sim.uH.sub(1))
+            .mul(sim.uW)
+            .add(iclamp(ix.add(dx), int(0), sim.uW.sub(1)))
         const disp = vec3(0).toVar()
         for (let dy = -1; dy <= 2; dy++) {
           for (let dx = -1; dx <= 2; dx++) {
             const j = simIndex(dx, dy)
-            disp.addAssign(simPos(j).sub(simRest(j)).mul(wx[dx + 1].mul(wy[dy + 1])))
+            disp.addAssign(
+              simPos(j)
+                .sub(simRest(j))
+                .mul(wx[dx + 1].mul(wy[dy + 1])),
+            )
           }
         }
         // Compression for the wrinkle layer: bilinear over the containing sim quad.
         const fx = fract(sx)
         const fy = fract(sy)
         const squeeze = squeezeOf
-          ? mix(mix(squeezeOf(simIndex(0, 0)), squeezeOf(simIndex(1, 0)), fx), mix(squeezeOf(simIndex(0, 1)), squeezeOf(simIndex(1, 1)), fx), fy)
+          ? mix(
+              mix(squeezeOf(simIndex(0, 0)), squeezeOf(simIndex(1, 0)), fx),
+              mix(squeezeOf(simIndex(0, 1)), squeezeOf(simIndex(1, 1)), fx),
+              fy,
+            )
           : float(0)
         const still = this.restPose.greaterThan(0.5)
         out.element(i).assign(vec4(restAt(i).add(select(still, vec3(0), disp)), select(still, float(0), squeeze)))
@@ -190,7 +204,8 @@ export class RenderSurface {
     this.h.value = sheet.h / detail
     // The soft foot is about one sim segment wide: enough to round the rim at render resolution.
     this.foot.value = sheet.h
-    for (const k of [this.staticPass, this.surfacePass, this.normalPass, this.backPass, this.backNormalPass]) k.count = RW * RH
+    for (const k of [this.staticPass, this.surfacePass, this.normalPass, this.backPass, this.backNormalPass])
+      k.count = RW * RH
     this.dirty = true
     return { RW, RH }
   }

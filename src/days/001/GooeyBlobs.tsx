@@ -1,12 +1,5 @@
 import { DialRoot, useDialKitController, type DialConfig } from 'dialkit'
-import {
-  AnimatePresence,
-  motion,
-  useMotionValue,
-  useReducedMotion,
-  useSpring,
-  type MotionValue,
-} from 'motion/react'
+import { AnimatePresence, motion, useMotionValue, useReducedMotion, useSpring, type MotionValue } from 'motion/react'
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from 'react'
 import { step, type Body } from './physics.ts'
 import { useTilt } from './useTilt.ts'
@@ -301,14 +294,7 @@ export function GooeyBlobs() {
         <div className="absolute inset-0" style={{ filter: 'url(#goo)' }}>
           <AnimatePresence>
             {drops.map((d) => (
-              <DropBlob
-                key={d.id}
-                drop={d}
-                size={v.size}
-                color={color}
-                bodies={bodies}
-                popIn={popIn}
-              />
+              <DropBlob key={d.id} drop={d} size={v.size} color={color} bodies={bodies} popIn={popIn} />
             ))}
           </AnimatePresence>
           <BlobChain
@@ -326,7 +312,10 @@ export function GooeyBlobs() {
         </div>
 
         <div className="pointer-events-none absolute bottom-4 left-4 max-w-[65vw] font-mono text-[11px] tracking-wide text-white/55 sm:bottom-5 sm:left-5">
-          <a href={import.meta.env.BASE_URL} className="pointer-events-auto text-white/35 transition-colors hover:text-white/80">
+          <a
+            href={import.meta.env.BASE_URL}
+            className="pointer-events-auto text-white/35 transition-colors hover:text-white/80"
+          >
             everydays
           </a>
           <span className="text-white/25"> / </span>
@@ -348,7 +337,10 @@ export function GooeyBlobs() {
         )}
 
         {/* Centered on wider screens, where the open DialKit panel reaches the bottom-right corner. */}
-        <div data-chrome className="pointer-events-none absolute right-4 bottom-4 flex items-center gap-3 sm:right-auto sm:bottom-5 sm:left-1/2 sm:-translate-x-1/2">
+        <div
+          data-chrome
+          className="pointer-events-none absolute right-4 bottom-4 flex items-center gap-3 sm:right-auto sm:bottom-5 sm:left-1/2 sm:-translate-x-1/2"
+        >
           <span className="hidden font-mono text-[11px] text-white/30 sm:inline">
             click to drop · {drops.length}/{MAX_DROPS}
             {v.tilt && tilt.status === 'active' && ' · tilt'}

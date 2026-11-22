@@ -63,7 +63,8 @@ function tangents(view: View) {
 
 function corners({ width, depth, top }: SheetBox): V3[] {
   const out: V3[] = []
-  for (const x of [-width / 2, width / 2]) for (const z of [-depth / 2, depth / 2]) for (const y of [0, top]) out.push([x, y, z])
+  for (const x of [-width / 2, width / 2])
+    for (const z of [-depth / 2, depth / 2]) for (const y of [0, top]) out.push([x, y, z])
   return out
 }
 
@@ -137,7 +138,10 @@ export function fitView(box: SheetBox, view: View, elevationDeg = ELEVATION): Ca
   }
   const fit = pose(hi)
   const b = bounds(fit, box, view)!
-  const offset: [number, number] = [(rect.x0 + rect.x1) / 2 - (b.x0 + b.x1) / 2, (rect.y0 + rect.y1) / 2 - (b.y0 + b.y1) / 2]
+  const offset: [number, number] = [
+    (rect.x0 + rect.x1) / 2 - (b.x0 + b.x1) / 2,
+    (rect.y0 + rect.y1) / 2 - (b.y0 + b.y1) / 2,
+  ]
   const { near, far } = clipPlanes(fit, offset, box, view)
   return { ...fit, offset, near, far }
 }
@@ -192,7 +196,13 @@ export function clipPlanes(pose: Pose, offset: [number, number], box: SheetBox, 
 }
 
 /** Where the ray through an NDC point (off-axis by `offset`) meets the plane y = planeY, or null. */
-export function rayHit(pose: Pose, offset: [number, number], view: View, ndc: [number, number], planeY: number): V3 | null {
+export function rayHit(
+  pose: Pose,
+  offset: [number, number],
+  view: View,
+  ndc: [number, number],
+  planeY: number,
+): V3 | null {
   const c = cameraPosition(pose)
   const { r, u, f } = basis(pose)
   const { tx, ty } = tangents(view)

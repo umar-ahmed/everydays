@@ -40,7 +40,6 @@ import type { Node } from 'three/webgpu'
 import type { RenderSurface } from './render.ts'
 import type { BubbleSim } from './sim.ts'
 
-
 export class FilmLook {
   readonly thickness = uniform(420)
   readonly iridescence = uniform(0.35)
@@ -75,7 +74,12 @@ export class FilmLook {
 
   readonly film: THREE.MeshPhysicalNodeMaterial
   /** The flat back film's materials, one per view. */
-  readonly back: { film: THREE.MeshPhysicalNodeMaterial; normals: THREE.MeshBasicNodeMaterial; wireframe: THREE.MeshBasicNodeMaterial; mapView: THREE.MeshBasicNodeMaterial }
+  readonly back: {
+    film: THREE.MeshPhysicalNodeMaterial
+    normals: THREE.MeshBasicNodeMaterial
+    wireframe: THREE.MeshBasicNodeMaterial
+    mapView: THREE.MeshBasicNodeMaterial
+  }
   /** How bright the backdrop behind the back film is (0 on black; it stands in for the table). */
   readonly backdrop = uniform(0)
   readonly table: THREE.MeshStandardNodeMaterial
@@ -98,7 +102,9 @@ export class FilmLook {
     const views = (layer: Layer) => {
       const normals = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide })
       normals.positionNode = this.position(layer)
-      normals.colorNode = normalize(varying(this.normal(layer).xyz)).mul(0.5).add(0.5)
+      normals.colorNode = normalize(varying(this.normal(layer).xyz))
+        .mul(0.5)
+        .add(0.5)
       const wireframe = new THREE.MeshBasicNodeMaterial({ color: layer.back ? 0x7d8590 : 0xd8dce2, wireframe: true })
       wireframe.positionNode = this.position(layer)
       return { normals, wireframe, mapView: this.makeMapView(sim, layer) }
@@ -148,7 +154,9 @@ export class FilmLook {
     const inside = varying(info.y)
     const restXZ = varying(this.surface.rest.element(vertexIndex).xz)
     const bubble = int(max(info.x, 0))
-    const popped = back ? float(0) : varying(select(this.live().and(info.x.greaterThanEqual(0)), sim.pops.element(bubble).x, float(0)))
+    const popped = back
+      ? float(0)
+      : varying(select(this.live().and(info.x.greaterThanEqual(0)), sim.pops.element(bubble).x, float(0)))
 
     // Creases: anisotropic ridged noise whose direction drifts across the film.
     const sharp = mix(float(1.5), float(9), this.sharpness)
@@ -163,12 +171,16 @@ export class FilmLook {
       const q = vec2(p.x.mul(c).sub(p.y.mul(s)), p.x.mul(s).add(p.y.mul(c))).mul(this.wrinkleScale)
       const r1 = oneMinus(abs(mx_noise_float(vec3(q.x.mul(1.1), q.y.mul(5), 0))))
       const r2 = oneMinus(abs(mx_noise_float(vec3(q.x.mul(2.4), q.y.mul(11), 3.3))))
-      return pow(r1, sharp).mul(0.7).add(pow(r2, sharp).mul(fine.mul(0.3)))
+      return pow(r1, sharp)
+        .mul(0.7)
+        .add(pow(r2, sharp).mul(fine.mul(0.3)))
     })
     // Taut domes stay smooth (and their steep walls would smear rest-space noise into streaks);
     // the laminated flat film, collapsed domes and squeezed areas crinkle.
     const mask = clamp(
-      oneMinus(inside).add(popped.mul(inside).mul(1.4)).add(smoothstep(0.03, 0.2, n.w).mul(1.5)),
+      oneMinus(inside)
+        .add(popped.mul(inside).mul(1.4))
+        .add(smoothstep(0.03, 0.2, n.w).mul(1.5)),
       0,
       2.5,
     )
@@ -191,8 +203,13 @@ export class FilmLook {
     const texMask = back ? float(0) : mix(float(0.25), float(1), inside).mul(texFade).mul(this.textureDepth)
     // Crosshatch ridges: r(t) = (0.5 + 0.5 cos 2 pi f t)^k along each axis.
     const ridge = (t: Node<'float'>) => {
-      const c = cos(t.mul(freq).mul(2 * Math.PI)).mul(0.5).add(0.5)
-      const slope = pow(max(c, 1e-4), k.sub(1)).mul(k).mul(sin(t.mul(freq).mul(2 * Math.PI)).mul(-Math.PI)).mul(freq)
+      const c = cos(t.mul(freq).mul(2 * Math.PI))
+        .mul(0.5)
+        .add(0.5)
+      const slope = pow(max(c, 1e-4), k.sub(1))
+        .mul(k)
+        .mul(sin(t.mul(freq).mul(2 * Math.PI)).mul(-Math.PI))
+        .mul(freq)
       return { h: pow(c, k), slope }
     }
     const rx = ridge(local.x)
@@ -202,9 +219,16 @@ export class FilmLook {
     // Dimples on offset rows: h = -exp(-k r^2), r measured in cells.
     const row = floor(local.y.mul(freq))
     const shift = row.sub(floor(row.mul(0.5)).mul(2)).mul(0.5)
-    const d = vec2(fract(local.x.mul(freq).add(shift)), fract(local.y.mul(freq))).sub(0.5).div(0.32)
+    const d = vec2(fract(local.x.mul(freq).add(shift)), fract(local.y.mul(freq)))
+      .sub(0.5)
+      .div(0.32)
     const e = exp(dot(d, d).mul(k.mul(-0.5)))
-    const dotsGrad = d.mul(e).mul(k).mul(freq).div(0.32).mul(texMask.mul(0.035).div(sqrt(k)))
+    const dotsGrad = d
+      .mul(e)
+      .mul(k)
+      .mul(freq)
+      .div(0.32)
+      .mul(texMask.mul(0.035).div(sqrt(k)))
     const dotsHeight = e.mul(texMask)
     const isGrid = this.texture.equal(1)
     const isDots = this.texture.equal(2)
@@ -236,7 +260,10 @@ export class FilmLook {
           })
         }
       }
-      const tilt = (id: Node<'vec2'>) => hash2(id.add(vec2(17.31, 5.17))).sub(0.5).mul(2)
+      const tilt = (id: Node<'vec2'>) =>
+        hash2(id.add(vec2(17.31, 5.17)))
+          .sub(0.5)
+          .mul(2)
       // 0 on the crease line, 1 well inside a facet.
       const edge = smoothstep(0, width, d2.sub(d1))
       const slope = mix(tilt(id1).add(tilt(id2)).mul(0.5), tilt(id1), edge)
@@ -280,7 +307,12 @@ export class FilmLook {
     // Emboss ridges glint: a touch smoother than the surrounding haze.
     film.roughnessNode = max(
       this.haze
-        .add(h0.mul(this.wrinkle).mul(mask).mul(mix(float(0.04), float(0.12), resolved)))
+        .add(
+          h0
+            .mul(this.wrinkle)
+            .mul(mask)
+            .mul(mix(float(0.04), float(0.12), resolved)),
+        )
         .sub(texHeight.mul(0.06))
         // Folds are a little rougher, like whitened stress lines.
         .add(creaseLines.mul(crumpleMask).mul(0.08)),
@@ -290,7 +322,10 @@ export class FilmLook {
     // overlapping layers multiply on their own. Clear film has sigma = 0.
     // Outside the footprints the cap layer stands for both bonded films, so it absorbs twice.
     const layers = back ? float(1) : mix(float(2), float(1), inside)
-    const sigma = log(max(this.tint, vec3(0.01))).negate().mul(this.density).mul(layers)
+    const sigma = log(max(this.tint, vec3(0.01)))
+      .negate()
+      .mul(this.density)
+      .mul(layers)
     const view = normalize(cameraPosition.sub(positionWorld))
     const path = float(1).div(max(abs(dot(bent, view)), 0.15))
     const transmittance = exp(sigma.mul(path).negate())
@@ -311,7 +346,9 @@ export class FilmLook {
     }
     film.iridescenceNode = this.iridescence
     // Thermoforming stretches the domes thinner than the flat base; noise breaks up the bands.
-    const wobble = mx_noise_float(vec3(restXZ.mul(0.9), 0.3)).mul(0.18).add(1)
+    const wobble = mx_noise_float(vec3(restXZ.mul(0.9), 0.3))
+      .mul(0.18)
+      .add(1)
     film.iridescenceThicknessNode = this.thickness.mul(float(1).sub(dome.mul(0.45))).mul(wobble)
     return film
   }
@@ -343,7 +380,11 @@ export class FilmLook {
     const { texel, id } = mapAt(sim, varying(this.surface.rest.element(vertexIndex).xz))
     const sd = texel.y
     const k = float(id)
-    const hue = vec3(fract(sin(k.mul(12.9898)).mul(43758.5)), fract(sin(k.mul(78.233)).mul(12543.1)), fract(sin(k.mul(39.425)).mul(24634.6)))
+    const hue = vec3(
+      fract(sin(k.mul(12.9898)).mul(43758.5)),
+      fract(sin(k.mul(78.233)).mul(12543.1)),
+      fract(sin(k.mul(39.425)).mul(24634.6)),
+    )
     const tint = mix(vec3(0.25), hue.mul(0.75).add(0.2), select(sd.lessThan(0), float(1), float(0.35)))
     const band = smoothstep(0, 0.12, fract(sd.div(this.contour)))
     const rim = oneMinus(smoothstep(0, 1.5, abs(sd).div(sim.texel)))
@@ -365,7 +406,11 @@ function mapAt(sim: BubbleSim, xz: Node<'vec2'>) {
   const t = xz.add(sim.half).div(sim.texel)
   const tx = int(floor(t.x.add(0.5)))
   const ty = int(floor(t.y.add(0.5)))
-  const onSheet = tx.greaterThanEqual(0).and(ty.greaterThanEqual(0)).and(tx.lessThan(sim.mapW)).and(ty.lessThan(sim.mapH))
+  const onSheet = tx
+    .greaterThanEqual(0)
+    .and(ty.greaterThanEqual(0))
+    .and(tx.lessThan(sim.mapW))
+    .and(ty.lessThan(sim.mapH))
   const texel = sim.map.element(select(onSheet, ty.mul(sim.mapW).add(tx), int(0)))
   return { texel, onSheet, id: int(select(onSheet, texel.x, float(-1))) }
 }

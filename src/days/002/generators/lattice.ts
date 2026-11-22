@@ -41,7 +41,9 @@ const circle = (p: V2) => length(p).sub(1)
 
 const square = (p: V2) => {
   const q = abs(p).sub(0.8 - 0.14)
-  return length(max(q, 0)).add(min(max(q.x, q.y), 0)).sub(0.14)
+  return length(max(q, 0))
+    .add(min(max(q.x, q.y), 0))
+    .sub(0.14)
 }
 
 const hexagon = (p: V2) => {
@@ -65,7 +67,9 @@ const star = (p: V2) => {
   a.assign(vec2(abs(a.x), a.y.sub(r)))
   const ba = vec2(rf * 0.587785252292, rf * 0.809016994375 - 1)
   const t = clamp(dot(a, ba).div(dot(ba, ba)), 0, r)
-  return length(a.sub(ba.mul(t))).mul(sign(a.y.mul(ba.x).sub(a.x.mul(ba.y)))).sub(0.05)
+  return length(a.sub(ba.mul(t)))
+    .mul(sign(a.y.mul(ba.x).sub(a.x.mul(ba.y))))
+    .sub(0.05)
 }
 
 const heart = (p: V2) => {
@@ -136,7 +140,9 @@ export class LatticeGenerator implements MapGenerator<LatticeOptions> {
   constructor(mapRaw: StorageBufferNode<'vec4'>) {
     this.compute = Fn(() => {
       const i = int(instanceIndex)
-      const p = vec2(float(i.mod(this.mapW)), float(i.div(this.mapW))).mul(this.texel).sub(this.half)
+      const p = vec2(float(i.mod(this.mapW)), float(i.div(this.mapW)))
+        .mul(this.texel)
+        .sub(this.half)
       const best = float(1e4).toVar()
       const bestId = float(-1).toVar()
       const cover = float(0).toVar()
@@ -157,7 +163,10 @@ export class LatticeGenerator implements MapGenerator<LatticeOptions> {
           const diff = c.sub(r.div(2)).sub(r)
           const sub = diff.sub(diff.div(3).mul(3)).add(3).mod(3)
           const valid = inRange.and(this.tiling.notEqual(2).or(sub.notEqual(0)))
-          const center = vec2(this.origin.x.add(float(c).mul(this.pitch)).add(shift), this.origin.y.add(float(r).mul(this.rowStep)))
+          const center = vec2(
+            this.origin.x.add(float(c).mul(this.pitch)).add(shift),
+            this.origin.y.add(float(r).mul(this.rowStep)),
+          )
           // Hexagons sit flat-to-flat on the triangular lattice; honeycomb triangles alternate.
           const angle = select(
             this.shape.equal(2).and(this.tiling.equal(1)),

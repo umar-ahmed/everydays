@@ -24,7 +24,10 @@ export const MAX_MAP = mapSize(CAP_W, CAP_H)
 /** Render vertices per sim segment, the Render detail dial. */
 export const DETAILS = [1, 2, 4] as const
 export const MAX_DETAIL = 4
-export const renderSize = (W: number, H: number, detail: number) => ({ RW: (W - 1) * detail + 1, RH: (H - 1) * detail + 1 })
+export const renderSize = (W: number, H: number, detail: number) => ({
+  RW: (W - 1) * detail + 1,
+  RH: (H - 1) * detail + 1,
+})
 const CAP_RENDER = renderSize(CAP_W, CAP_H, MAX_DETAIL)
 export const MAX_RENDER_VERTS = CAP_RENDER.RW * CAP_RENDER.RH
 
@@ -131,7 +134,8 @@ export function layoutFor({ size, spacing, across, aspect, lattice, budget = FUL
       texel,
     }
     fallback = layout
-    if (fitsCapacity(W, H) && W * H <= budget.verts && layout.sites <= Math.min(budget.bubbles, MAX_BUBBLES)) return layout
+    if (fitsCapacity(W, H) && W * H <= budget.verts && layout.sites <= Math.min(budget.bubbles, MAX_BUBBLES))
+      return layout
   }
   // Even two bubbles across overflow (an extreme aspect): shorten the long side instead.
   const l = fallback!

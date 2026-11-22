@@ -200,7 +200,9 @@ export function BubbleWrap() {
       if (path === 'reset view') appRef.current?.resetView()
     }
     const typing = (e: KeyboardEvent) =>
-      e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement
+      e.target instanceof HTMLInputElement ||
+      e.target instanceof HTMLTextAreaElement ||
+      e.target instanceof HTMLSelectElement
     const onKey = (e: KeyboardEvent) => {
       if (typing(e) || e.metaKey || e.ctrlKey || e.altKey) return
       if (e.key === 'r') appRef.current?.reset()
@@ -231,10 +233,16 @@ export function BubbleWrap() {
   return (
     <>
       <main className="fixed inset-0 overflow-hidden bg-black select-none">
-        <div ref={container} className="absolute inset-0" style={{ cursor: status === 'running' ? 'none' : 'default' }} />
+        <div
+          ref={container}
+          className="absolute inset-0"
+          style={{ cursor: status === 'running' ? 'none' : 'default' }}
+        />
 
         {status === 'loading' && (
-          <p className="absolute inset-0 grid place-items-center font-mono text-xs text-white/40">warming up the GPU…</p>
+          <p className="absolute inset-0 grid place-items-center font-mono text-xs text-white/40">
+            warming up the GPU…
+          </p>
         )}
         {status === 'unsupported' && (
           <div className="absolute inset-0 grid place-items-center p-6">
@@ -253,8 +261,14 @@ export function BubbleWrap() {
           </div>
         )}
 
-        <div data-chrome className="pointer-events-none absolute top-4 left-4 max-w-[65vw] font-mono text-[11px] tracking-wide text-white/55 lg:top-auto lg:bottom-5 lg:left-5">
-          <a href={import.meta.env.BASE_URL} className="pointer-events-auto text-white/35 transition-colors hover:text-white/80">
+        <div
+          data-chrome
+          className="pointer-events-none absolute top-4 left-4 max-w-[65vw] font-mono text-[11px] tracking-wide text-white/55 lg:top-auto lg:bottom-5 lg:left-5"
+        >
+          <a
+            href={import.meta.env.BASE_URL}
+            className="pointer-events-auto text-white/35 transition-colors hover:text-white/80"
+          >
             everydays
           </a>
           <span className="text-white/25"> / </span>

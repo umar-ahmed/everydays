@@ -174,7 +174,11 @@ export class BubbleSim {
       })
       const intact = pop.x.lessThan(0.5)
       // A pinhole only vents once squeezed past the fill pressure, so it hisses flat when pressed.
-      const leak = select(pinhole.greaterThan(0.5).and(intact), max(gauge.sub(this.fill.mul(1.2)), 0).mul(this.leakRate), float(0))
+      const leak = select(
+        pinhole.greaterThan(0.5).and(intact),
+        max(gauge.sub(this.fill.mul(1.2)), 0).mul(this.leakRate),
+        float(0),
+      )
       // Venting continues until the inside is at atmospheric for the current volume.
       const left = max(gas.sub(leak.mul(this.dt)), pow(squeeze, -GAMMA))
       st.assign(vec4(select(intact, gauge, float(0)), volume, left, pinhole))
@@ -197,45 +201,49 @@ export class BubbleSim {
       const gauge = state.element(int(info.x)).x
       const push = around(i).mul(gauge.mul(this.kPressure).mul(info.y).div(this.uH2))
       const acc = vec3(0, this.gravity.negate(), 0).add(push)
-      const vel = v.element(i).xyz.add(acc.mul(this.dt)).mul(float(1).sub(this.damping.mul(this.dt)))
+      const vel = v
+        .element(i)
+        .xyz.add(acc.mul(this.dt))
+        .mul(float(1).sub(this.damping.mul(this.dt)))
       v.element(i).assign(vec4(vel, 0))
       p.element(i).assign(vec4(x.element(i).xyz.add(vel.mul(this.dt)), 1))
     })().compute(MAX_VERTS)
 
-    const makeSolve = (src: typeof p, dst: typeof p) => Fn(() => {
-      const i = int(instanceIndex)
-      const ix = i.mod(uW)
-      const iy = i.div(uW)
-      const pi = src.element(i).xyz
-      const ri = rest.element(i)
-      const info = meta.element(i)
-      const popped = pops.element(int(info.x)).x
-      const aBend = select(
-        info.y.lessThan(0.5),
-        this.aBendBase,
-        select(popped.greaterThan(0.5), this.aBendPopped, this.aBendDome),
-      )
-      const dt2 = this.dt.mul(this.dt)
-      const sum = vec3(0).toVar()
-      const count = float(0).toVar()
-      for (const [dx, dy, kind] of NEIGHBOURS) {
-        const jx = ix.add(dx)
-        const jy = iy.add(dy)
-        const ok = jx.greaterThanEqual(0).and(jx.lessThan(uW)).and(jy.greaterThanEqual(0)).and(jy.lessThan(uH))
-        If(ok, () => {
-          const j = jy.mul(uW).add(jx)
-          const d = src.element(j).xyz.sub(pi)
-          const dist = max(length(d), 1e-6)
-          const c = dist.sub(length(rest.element(j).xyz.sub(ri.xyz)))
-          // Film resists stretching hard and compression barely, so an unpressurised dome buckles.
-          const alpha = kind === 'bend' ? aBend : select(c.greaterThan(0), this.aStretch, this.aCompress)
-          sum.addAssign(d.div(dist).mul(c.div(float(2).add(alpha.div(dt2)))))
-          count.addAssign(1)
-        })
-      }
-      // Jacobi: average this vertex's corrections, over-relaxed (Macklin et al. 2014).
-      dst.element(i).assign(vec4(pi.add(sum.mul(this.omega.div(max(count, 1)))), 1))
-    })().compute(MAX_VERTS)
+    const makeSolve = (src: typeof p, dst: typeof p) =>
+      Fn(() => {
+        const i = int(instanceIndex)
+        const ix = i.mod(uW)
+        const iy = i.div(uW)
+        const pi = src.element(i).xyz
+        const ri = rest.element(i)
+        const info = meta.element(i)
+        const popped = pops.element(int(info.x)).x
+        const aBend = select(
+          info.y.lessThan(0.5),
+          this.aBendBase,
+          select(popped.greaterThan(0.5), this.aBendPopped, this.aBendDome),
+        )
+        const dt2 = this.dt.mul(this.dt)
+        const sum = vec3(0).toVar()
+        const count = float(0).toVar()
+        for (const [dx, dy, kind] of NEIGHBOURS) {
+          const jx = ix.add(dx)
+          const jy = iy.add(dy)
+          const ok = jx.greaterThanEqual(0).and(jx.lessThan(uW)).and(jy.greaterThanEqual(0)).and(jy.lessThan(uH))
+          If(ok, () => {
+            const j = jy.mul(uW).add(jx)
+            const d = src.element(j).xyz.sub(pi)
+            const dist = max(length(d), 1e-6)
+            const c = dist.sub(length(rest.element(j).xyz.sub(ri.xyz)))
+            // Film resists stretching hard and compression barely, so an unpressurised dome buckles.
+            const alpha = kind === 'bend' ? aBend : select(c.greaterThan(0), this.aStretch, this.aCompress)
+            sum.addAssign(d.div(dist).mul(c.div(float(2).add(alpha.div(dt2)))))
+            count.addAssign(1)
+          })
+        }
+        // Jacobi: average this vertex's corrections, over-relaxed (Macklin et al. 2014).
+        dst.element(i).assign(vec4(pi.add(sum.mul(this.omega.div(max(count, 1)))), 1))
+      })().compute(MAX_VERTS)
     const solvePQ = makeSolve(p, q)
     const solveQP = makeSolve(q, p)
 
@@ -298,7 +306,15 @@ export class BubbleSim {
 
   load(sheet: Sheet, fill: number) {
     const n = sheet.W * sheet.H
-    const write = (node: { value: { array: ArrayLike<number> & { set(a: ArrayLike<number>): void; fill(v: number): void }; needsUpdate: boolean } }, data?: Float32Array) => {
+    const write = (
+      node: {
+        value: {
+          array: ArrayLike<number> & { set(a: ArrayLike<number>): void; fill(v: number): void }
+          needsUpdate: boolean
+        }
+      },
+      data?: Float32Array,
+    ) => {
       const arr = node.value.array
       arr.fill(0)
       if (data) arr.set(data)
@@ -377,4 +393,3 @@ export class BubbleSim {
     renderer.compute(list)
   }
 }
-

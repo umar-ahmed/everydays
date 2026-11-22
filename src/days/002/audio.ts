@@ -27,7 +27,8 @@ export class PopSynth {
   /** Must run inside a user gesture (browsers keep audio locked until then). */
   unlock() {
     if (!this.ctx) {
-      const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+      const Ctor =
+        window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
       const ctx = new Ctor({ latencyHint: 'interactive' })
       const limiter = ctx.createDynamicsCompressor()
       limiter.threshold.value = -10
@@ -80,7 +81,7 @@ export class PopSynth {
     const gain = this.volume * Math.min(1, 0.25 + 0.5 * Math.pow(p, 0.7)) * jitter()
     // Smaller cavities ring higher; higher pressure releases faster, so the click is brighter.
     const ring = (2300 / Math.max(size, 0.3)) * this.pitch * jitter()
-    const decay = (0.012 + 0.03 * Math.min(size, 2.5) / 2.5) / (0.8 + 0.4 * p)
+    const decay = (0.012 + (0.03 * Math.min(size, 2.5)) / 2.5) / (0.8 + 0.4 * p)
     const start = now + 0.002
 
     const panner = ctx.createStereoPanner()
@@ -90,7 +91,7 @@ export class PopSynth {
 
     // N-wave: compression then rarefaction over ~2R/c (tens of microseconds for a 1 cm bubble),
     // so at audio rates it is a few-sample doublet with energy right up the spectrum.
-    const halfSamples = Math.max(1, Math.round(((size / 100) / 343) * ctx.sampleRate))
+    const halfSamples = Math.max(1, Math.round((size / 100 / 343) * ctx.sampleRate))
     const pulse = ctx.createBuffer(1, halfSamples * 2 + 2, ctx.sampleRate)
     const pd = pulse.getChannelData(0)
     for (let k = 0; k < halfSamples * 2; k++) pd[k] = 1 - k / halfSamples
