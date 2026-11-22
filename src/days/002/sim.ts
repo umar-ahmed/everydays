@@ -66,6 +66,8 @@ export class BubbleSim {
   readonly q = instancedArray(MAX_VERTS, 'vec4')
   readonly normal = instancedArray(MAX_VERTS, 'vec4')
   readonly rest = instancedArray(MAX_VERTS, 'vec4')
+  /** Rest-pose normals (w = 0: no compression), for the Debug > rest pose view. */
+  readonly restNormal = instancedArray(MAX_VERTS, 'vec4')
   readonly meta = instancedArray(MAX_VERTS, 'vec4')
   /** Pop events, one texel per bubble: popped, gauge pressure at burst, burst time, rest volume. */
   readonly pops = instancedArray(MAX_BUBBLES, 'vec4')
@@ -264,6 +266,7 @@ export class BubbleSim {
     write(this.v)
     write(this.normal)
     write(this.rest, sheet.rest)
+    write(this.restNormal, restNormals(sheet))
     write(this.meta, sheet.meta)
     write(this.pops, sheet.bubbles)
     const state = new Float32Array(sheet.cols * sheet.rows * 4)
@@ -306,4 +309,33 @@ export class BubbleSim {
     list.push(this.normals)
     renderer.compute(list)
   }
+}
+
+/** CPU twin of the normals kernel, run on the rest positions. */
+function restNormals({ rest, W, H }: Sheet) {
+  const out = new Float32Array(W * H * 4)
+  const at = (ix: number, iy: number, c: number) => rest[(iy * W + ix) * 4 + c]
+  for (let iy = 0; iy < H; iy++) {
+    for (let ix = 0; ix < W; ix++) {
+      const l = Math.max(ix - 1, 0)
+      const r = Math.min(ix + 1, W - 1)
+      const u = Math.max(iy - 1, 0)
+      const d = Math.min(iy + 1, H - 1)
+      const ax = at(ix, d, 0) - at(ix, u, 0)
+      const ay = at(ix, d, 1) - at(ix, u, 1)
+      const az = at(ix, d, 2) - at(ix, u, 2)
+      const bx = at(r, iy, 0) - at(l, iy, 0)
+      const by = at(r, iy, 1) - at(l, iy, 1)
+      const bz = at(r, iy, 2) - at(l, iy, 2)
+      const nx = ay * bz - az * by
+      const ny = az * bx - ax * bz
+      const nz = ax * by - ay * bx
+      const len = Math.hypot(nx, ny, nz) || 1
+      const k = (iy * W + ix) * 4
+      out[k] = nx / len
+      out[k + 1] = ny / len
+      out[k + 2] = nz / len
+    }
+  }
+  return out
 }

@@ -55,10 +55,35 @@ export class FilmLook {
 
   readonly film: THREE.MeshPhysicalNodeMaterial
   readonly table: THREE.MeshStandardNodeMaterial
+  /** Debug views: world normals as colour, and the triangle wireframe. */
+  readonly normals: THREE.MeshBasicNodeMaterial
+  readonly wireframe: THREE.MeshBasicNodeMaterial
+
+  /** 1 renders the sheet builder's rest geometry with no sim output (Debug > Simulation). */
+  readonly restPose = uniform(0)
 
   constructor(sim: BubbleSim) {
     this.film = this.makeFilm(sim)
     this.table = this.makeTable(sim)
+    const position = this.position(sim)
+    this.normals = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide })
+    this.normals.positionNode = position
+    this.normals.colorNode = normalize(varying(this.normal(sim).xyz)).mul(0.5).add(0.5)
+    this.wireframe = new THREE.MeshBasicNodeMaterial({ color: 0xd8dce2, wireframe: true })
+    this.wireframe.positionNode = position
+  }
+
+  private live() {
+    return this.restPose.lessThan(0.5)
+  }
+
+  private position(sim: BubbleSim) {
+    return select(this.live(), sim.x.element(vertexIndex).xyz, sim.rest.element(vertexIndex).xyz)
+  }
+
+  /** xyz normal, w compression; rest normals carry w = 0. */
+  private normal(sim: BubbleSim) {
+    return select(this.live(), sim.normal.element(vertexIndex), sim.restNormal.element(vertexIndex))
   }
 
   /**
@@ -79,12 +104,12 @@ export class FilmLook {
       attenuationColor: new THREE.Color(0xeef1f4),
       attenuationDistance: 3,
     })
-    film.positionNode = sim.x.element(vertexIndex).xyz
-    const n = varying(sim.normal.element(vertexIndex))
+    film.positionNode = this.position(sim)
+    const n = varying(this.normal(sim))
     const dome = varying(sim.rest.element(vertexIndex).w)
     const inside = varying(sim.meta.element(vertexIndex).y)
     const restXZ = varying(sim.rest.element(vertexIndex).xz)
-    const popped = varying(sim.pops.element(int(sim.meta.element(vertexIndex).x)).x)
+    const popped = varying(select(this.live(), sim.pops.element(int(sim.meta.element(vertexIndex).x)).x, float(0)))
 
     // Creases: anisotropic ridged noise whose direction drifts across the film.
     const sharp = mix(float(1.5), float(9), this.sharpness)
@@ -143,7 +168,7 @@ export class FilmLook {
       .and(id.x.lessThan(float(this.cols)))
       .and(id.y.lessThan(float(this.rows)))
     const b = select(inside, int(id.y).mul(this.cols).add(int(id.x)), int(0))
-    const intact = oneMinus(sim.pops.element(b).x)
+    const intact = select(this.live(), oneMinus(sim.pops.element(b).x), float(1))
     const f = fract(local).sub(0.5).mul(this.cell).sub(this.spot)
     const focus: Node<'float'> = exp(dot(f, f).div(this.domeR.mul(this.domeR).mul(0.06)).negate())
     const glow = select(inside, focus.mul(intact).mul(this.caustics).mul(0.035), float(0))

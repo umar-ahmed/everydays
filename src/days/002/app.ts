@@ -25,6 +25,8 @@ export type Params = SheetConfig & {
   volume: number
   pitch: number
   reducedMotion: boolean
+  simulation: 'running' | 'paused' | 'rest pose'
+  view: 'shaded' | 'normals' | 'wireframe'
 }
 
 export type Stats = { popped: number; total: number }
@@ -58,6 +60,7 @@ export class BubbleWrapApp {
   private rim = new THREE.DirectionalLight(0xdfe9ff, 1)
   private fill = new THREE.DirectionalLight(0xfff3e6, 0.35)
   private ring: THREE.Mesh
+  private mesh: THREE.Mesh | null = null
   private look = new FilmLook(this.sim)
 
   private pointer = new THREE.Vector2()
@@ -126,6 +129,7 @@ export class BubbleWrapApp {
     mesh.frustumCulled = false
     mesh.renderOrder = 1
     scene.add(mesh, this.ring)
+    this.mesh = mesh
 
     this.loadSheet(this.sheet)
     this.apply(this.params)
@@ -191,6 +195,10 @@ export class BubbleWrapApp {
     this.scene.environmentIntensity = 0.9 * p.light
     this.synth.volume = p.volume
     this.synth.pitch = p.pitch
+    look.restPose.value = p.simulation === 'rest pose' ? 1 : 0
+    if (this.mesh) {
+      this.mesh.material = p.view === 'normals' ? look.normals : p.view === 'wireframe' ? look.wireframe : look.film
+    }
   }
 
   private fit = () => {
@@ -242,6 +250,9 @@ export class BubbleWrapApp {
     this.last = now
     this.elapsed += dt
     const { sheet, params, sim } = this
+    // Paused and rest pose skip every dispatch and readback. The clock above still ticks
+    // each frame, so going back to running starts from a normal-sized step.
+    const live = params.simulation === 'running'
 
     this.placeCamera(this.elapsed)
     this.camera.updateMatrixWorld()
@@ -252,18 +263,20 @@ export class BubbleWrapApp {
     const onSheet = this.hovering && this.raycaster.ray.intersectPlane(this.plane, this.hit) !== null
     // A pressing finger: the bottom of the sphere sinks to a depth set by Press strength.
     const bottom = Math.max(sheet.domeHeight * (1 - params.pressStrength), 0.01)
-    const target = this.pressed && onSheet ? bottom + r : sheet.domeHeight + r + 1
-    this.fingerY += (target - this.fingerY) * (1 - Math.exp(-dt * (this.pressed ? 14 : 30)))
+    const pressing = this.pressed && onSheet && live
+    const target = pressing ? bottom + r : sheet.domeHeight + r + 1
+    this.fingerY += (target - this.fingerY) * (1 - Math.exp(-dt * (pressing ? 14 : 30)))
     sim.finger.value.set(this.hit.x, this.fingerY, this.hit.z)
     sim.time.value = this.elapsed
 
-    this.ring.visible = onSheet
+    this.ring.visible = onSheet && live
     this.ring.position.set(this.hit.x, sheet.domeHeight + 0.04, this.hit.z)
     this.ring.scale.set(params.tool === 'roller' ? sim.rollerHalf.value : r, 1, r)
 
-    sim.step(this.renderer, dt, params.substeps)
+    if (live) sim.step(this.renderer, dt, params.substeps)
+    else this.synth.hiss(0)
     this.renderer.render(this.scene, this.camera)
-    this.pollPops()
+    if (live) this.pollPops()
   }
 
   private pollPops() {

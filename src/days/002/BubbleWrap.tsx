@@ -37,6 +37,11 @@ const dialConfig = {
     'pop volume': [0.7, 0, 1, 0.01],
     'pop pitch': [1, 0.5, 2, 0.01],
   },
+  debug: {
+    _collapsed: true,
+    simulation: { type: 'select', options: ['running', 'paused', 'rest pose'], default: 'running' },
+    'debug view': { type: 'select', options: ['shaded', 'normals', 'wireframe'], default: 'shaded' },
+  },
   reset: { type: 'action' },
 } satisfies DialConfig
 
@@ -73,6 +78,8 @@ export function BubbleWrap() {
     volume: v.sound['pop volume'],
     pitch: v.sound['pop pitch'],
     reducedMotion,
+    simulation: v.debug.simulation as Params['simulation'],
+    view: v.debug['debug view'] as Params['view'],
   }
   const paramsRef = useRef(params)
 
@@ -101,7 +108,10 @@ export function BubbleWrap() {
       }
       if (cancelled) return app.dispose()
       appRef.current = app
-      if (import.meta.env.DEV) (window as unknown as { bubblewrap: BubbleWrapApp }).bubblewrap = app
+      // `?debug` exposes the app for inspection and the headless checks.
+      if (import.meta.env.DEV || new URLSearchParams(location.search).has('debug')) {
+        ;(window as unknown as { bubblewrap: BubbleWrapApp }).bubblewrap = app
+      }
       setStatus('running')
     })()
     return () => {
