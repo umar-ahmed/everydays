@@ -97,7 +97,11 @@ export function BubbleWrap() {
         return
       }
       if (cancelled || !container.current) return
-      app = new BubbleWrapApp(container.current, paramsRef.current, setStats)
+      // Skip no-op updates: a sheet rebuild reports 0/N on every dial tick, and re-rendering for
+      // an unchanged count re-runs the params effect inside DialKit's update.
+      const onStats = (s: Stats) =>
+        setStats((prev) => (prev.popped === s.popped && prev.total === s.total ? prev : s))
+      app = new BubbleWrapApp(container.current, paramsRef.current, onStats)
       try {
         await app.init()
       } catch {

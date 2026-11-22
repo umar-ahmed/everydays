@@ -179,7 +179,10 @@ export class BubbleWrapApp {
     this.geometry.setIndex(new THREE.BufferAttribute(sheet.index, 1))
     this.geometry.setDrawRange(0, sheet.index.length)
     this.seen = new Uint8Array(sheet.cols * sheet.rows)
-    this.onStats({ popped: 0, total: sheet.cols * sheet.rows })
+    // Rebuilds run inside React's synchronous flush of a dial change; reporting from there nests
+    // a state update per slider step and trips React's update-depth limit under rapid input.
+    const total = sheet.cols * sheet.rows
+    queueMicrotask(() => this.onStats({ popped: 0, total }))
   }
 
   private apply(p: Params) {
