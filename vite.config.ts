@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
-import { defineConfig, loadEnv, type Plugin } from 'vite'
+import { defineConfig, loadEnv, type Plugin, lazyPlugins } from 'vite-plus'
 import { days, site } from './src/days.ts'
 
 const root = import.meta.dirname
@@ -73,8 +73,54 @@ export default defineConfig(({ mode }) => {
   }
 
   return {
+    fmt: {
+      semi: false,
+      singleQuote: true,
+      printWidth: 120,
+      ignorePatterns: ['dist/**', 'public/**', 'package-lock.json'],
+    },
+    lint: {
+      ignorePatterns: ['dist/**', 'public/**'],
+      plugins: ['react', 'typescript', 'oxc'],
+      rules: {
+        'react/rules-of-hooks': 'error',
+        'react/only-export-components': [
+          'warn',
+          {
+            allowConstantExport: true,
+          },
+        ],
+        'vite-plus/prefer-vite-plus-imports': 'error',
+      },
+      options: {
+        typeAware: true,
+        typeCheck: true,
+      },
+      jsPlugins: [
+        {
+          name: 'vite-plus',
+          specifier: 'vite-plus/oxlint-plugin',
+        },
+      ],
+    },
+    test: {
+      include: ['src/**/*.test.ts'],
+    },
+    run: {
+      tasks: {
+        // Headless Chromium + SwiftShader WebGPU validation of the day 002 bubble map, sheet and
+        // camera invariants. Slow (minutes), so it is cached on exactly what it exercises.
+        'check:gpu': {
+          command: 'node scripts/check-002/run.mjs',
+          cache: {
+            input: ['scripts/check-002/**', 'src/days/002/**', 'src/days.ts', 'vite.config.ts', 'package-lock.json'],
+            output: [],
+          },
+        },
+      },
+    },
     base,
-    plugins: [react(), tailwindcss(), openGraph(siteUrl, base)],
+    plugins: lazyPlugins(() => [react(), tailwindcss(), openGraph(siteUrl, base)]),
     // three's WebGPU build alone is ~800 kB; only day 002 loads it.
     build: { rollupOptions: { input }, chunkSizeWarningLimit: 1200 },
     server: { port: 43117, host: true },
