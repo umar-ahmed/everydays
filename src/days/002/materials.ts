@@ -38,9 +38,9 @@ export class FilmLook {
   readonly thickness = uniform(420)
   readonly iridescence = uniform(0.35)
   readonly haze = uniform(0.16)
-  readonly wrinkle = uniform(0.6)
+  readonly wrinkle = uniform(0.45)
   readonly wrinkleScale = uniform(1)
-  readonly sharpness = uniform(0.6)
+  readonly sharpness = uniform(0.4)
   /** Refraction depth of a full dome, cm: each dome reads as a small lens. */
   readonly lens = uniform(0.4)
 
@@ -82,11 +82,16 @@ export class FilmLook {
     film.positionNode = sim.x.element(vertexIndex).xyz
     const n = varying(sim.normal.element(vertexIndex))
     const dome = varying(sim.rest.element(vertexIndex).w)
+    const inside = varying(sim.meta.element(vertexIndex).y)
     const restXZ = varying(sim.rest.element(vertexIndex).xz)
     const popped = varying(sim.pops.element(int(sim.meta.element(vertexIndex).x)).x)
 
     // Creases: anisotropic ridged noise whose direction drifts across the film.
     const sharp = mix(float(1.5), float(9), this.sharpness)
+    // Fade creases where they get finer than a pixel: the fine octave first, then the coarse one.
+    const footprint = fwidth(restXZ.x).add(fwidth(restXZ.y)).mul(this.wrinkleScale)
+    const resolved = smoothstep(0.06, 0.02, footprint)
+    const fine = smoothstep(0.025, 0.008, footprint)
     const crease = Fn(([p]: [Node<'vec2'>]) => {
       const theta = mx_noise_float(vec3(p.mul(0.35), 1.7)).mul(Math.PI)
       const c = cos(theta)
@@ -94,11 +99,12 @@ export class FilmLook {
       const q = vec2(p.x.mul(c).sub(p.y.mul(s)), p.x.mul(s).add(p.y.mul(c))).mul(this.wrinkleScale)
       const r1 = oneMinus(abs(mx_noise_float(vec3(q.x.mul(1.1), q.y.mul(5), 0))))
       const r2 = oneMinus(abs(mx_noise_float(vec3(q.x.mul(2.4), q.y.mul(11), 3.3))))
-      return pow(r1, sharp).mul(0.7).add(pow(r2, sharp).mul(0.3))
+      return pow(r1, sharp).mul(0.7).add(pow(r2, sharp).mul(fine.mul(0.3)))
     })
-    // Taut domes stay smooth; the laminated flat film, collapsed domes and squeezed areas crinkle.
+    // Taut domes stay smooth (and their steep walls would smear rest-space noise into streaks);
+    // the laminated flat film, collapsed domes and squeezed areas crinkle.
     const mask = clamp(
-      mix(float(1), float(0.18), dome).add(popped.mul(dome).mul(1.4)).add(n.w.mul(3)),
+      oneMinus(inside).add(popped.mul(inside).mul(1.4)).add(smoothstep(0.03, 0.2, n.w).mul(1.5)),
       0,
       2.5,
     )
@@ -106,9 +112,6 @@ export class FilmLook {
     const h0 = crease(restXZ)
     const hu = crease(restXZ.add(vec2(eps, 0)))
     const hv = crease(restXZ.add(vec2(0, eps)))
-    // Fade creases out where they get finer than a pixel, instead of letting them sparkle.
-    const footprint = fwidth(restXZ.x).add(fwidth(restXZ.y)).mul(this.wrinkleScale)
-    const resolved = smoothstep(0.09, 0.03, footprint)
     const amp = this.wrinkle.mul(mask).mul(resolved).mul(0.006)
     const N = normalize(n.xyz)
     const T = normalize(vec3(1, 0, 0).sub(N.mul(N.x)))
