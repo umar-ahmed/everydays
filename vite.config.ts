@@ -75,7 +75,8 @@ export default defineConfig(({ mode }) => {
   return {
     base,
     plugins: [react(), tailwindcss(), openGraph(siteUrl, base)],
-    build: { rollupOptions: { input } },
+    // three's WebGPU build alone is ~800 kB; only day 002 loads it.
+    build: { rollupOptions: { input }, chunkSizeWarningLimit: 1200 },
     server: { port: 43117, host: true },
     preview: { port: 43118, host: true },
   }
