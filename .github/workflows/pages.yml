@@ -19,19 +19,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      # Installs vp, the Node version from .nvmrc and the dependencies (vp install), with caching.
+      - uses: voidzero-dev/setup-vp@v1.22.0
         with:
-          node-version: 22
-          cache: npm
+          node-version-file: .nvmrc
+          cache: true
       - id: pages
         uses: actions/configure-pages@v6
         with:
           enablement: true
-      - run: npm ci
-      # The day 002 checks run the real WebGPU map generator in headless Chromium (SwiftShader).
-      - run: npx playwright install --only-shell chromium
-      - run: npm run check
-      - run: npm run build
+      - run: vp check
+      - run: vp test
+      # The day 002 GPU check runs the real WebGPU map generator in headless Chromium (SwiftShader).
+      # It is a cached Vite Task; restoring the task cache skips it when nothing it reads changed.
+      - name: Restore Vite Task cache
+        id: vite-task-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: node_modules/.vite/task-cache
+          key: vite-task-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            vite-task-${{ runner.os }}-${{ runner.arch }}-
+      - run: vp exec playwright install --only-shell chromium
+      - run: vp run check:gpu
+      - name: Save Vite Task cache
+        if: success()
+        uses: actions/cache/save@v6
+        with:
+          path: node_modules/.vite/task-cache
+          key: ${{ steps.vite-task-cache.outputs.cache-primary-key }}
+      - run: vp build
         env:
           SITE_URL: ${{ steps.pages.outputs.base_url }}
       - uses: actions/upload-pages-artifact@v5

@@ -6,19 +6,30 @@ Built with Vite + React + TypeScript, [Motion](https://motion.dev) (`motion/reac
 
 ## Run it
 
+The toolchain is [Vite+](https://viteplus.dev) (`vp`): Vite on Rolldown, Vitest, Oxlint, Oxfmt and Vite Task in one package. Use Node `^22.18.0 || ^24.11.0 || >=26` (`.nvmrc` pins 22.23.4). The `vp` binary comes with the `vite-plus` dev dependency, so either install it globally (`curl -fsSL https://vite.plus | bash`) or prefix the commands below with `npx`.
+
 ```bash
-npm install
-npm run dev      # http://localhost:43117
-npm run build    # static site in dist/
-npm run preview  # serve dist/ at http://localhost:43118
+vp install            # install dependencies (npm under the hood)
+vp dev                # http://localhost:43117
+vp check              # format check (Oxfmt), lint (Oxlint) and type check, type-aware
+vp check --fix        # ...and apply formatting and autofixes
+vp test               # unit tests (Vitest, src/**/*.test.ts)
+vp build              # static site in dist/ (index, /001/, /002/)
+vp preview            # serve dist/ at http://localhost:43118
+vp run check:gpu      # day 002 WebGPU checks in headless Chromium (cached, see below)
+npm run og            # regenerate the Open Graph cards (see below)
 ```
+
+`vp lint` and `vp fmt` run the linter and formatter on their own. Lint and format settings live in the `lint` and `fmt` blocks of `vite.config.ts`.
+
+`vp run check:gpu` runs the real day 002 bubble-map generator on SwiftShader WebGPU in headless Chromium and checks every sheet, layout and camera invariant across five viewports. It needs Playwright's Chromium (`vp exec playwright install --only-shell chromium`) and takes a minute or two. It is a cached Vite Task: it replays instantly until something under `src/days/002/`, `scripts/check-002/`, `src/days.ts`, `vite.config.ts` or the lockfile changes. `vp cache clean` forces a rerun.
 
 ## Days
 
-| Day | Title | Concept |
-| --- | --- | --- |
-| [001](./001/) | gooey cursor blobs | Spring-chained metaballs (SVG blur + alpha-threshold filter) that stretch on fast moves and melt back together. Click to drop blobs, then drag the goo into them. On a phone, tilt sets gravity: drops roll like marbles of goo, coast when you level out and bounce off the edges (iOS asks via an "enable tilt" button). |
-| [002](./002/) | bubble wrap | An XPBD cloth on the GPU (WebGPU compute, many small substeps of Jacobi passes) whose domes hold gas: squeezing one raises its pressure adiabatically until it bursts, collapses and crinkles. Pops are read back from the GPU and synthesised with Web Audio; some bubbles have pinholes and hiss flat instead. Six dome shapes, a finger or rolling pin, thin-film iridescence and a procedural crease shader. Needs WebGPU; other browsers get a message. |
+| Day           | Title              | Concept                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [001](./001/) | gooey cursor blobs | Spring-chained metaballs (SVG blur + alpha-threshold filter) that stretch on fast moves and melt back together. Click to drop blobs, then drag the goo into them. On a phone, tilt sets gravity: drops roll like marbles of goo, coast when you level out and bounce off the edges (iOS asks via an "enable tilt" button).                                                                                                                                   |
+| [002](./002/) | bubble wrap        | An XPBD cloth on the GPU (WebGPU compute, many small substeps of Jacobi passes) whose domes hold gas: squeezing one raises its pressure adiabatically until it bursts, collapses and crinkles. Pops are read back from the GPU and synthesised with Web Audio; some bubbles have pinholes and hiss flat instead. Six dome shapes, a finger or rolling pin, thin-film iridescence and a procedural crease shader. Needs WebGPU; other browsers get a message. |
 
 ## Adding a day
 
@@ -39,12 +50,12 @@ Every page gets `og:title`, `og:description`, `og:image`, `og:url` and `twitter:
 
 On Vercel, set `SITE_URL` in the project's environment variables once you have the domain. Until then, the Vercel production URL is used automatically.
 
-`npm run og` regenerates `public/og.png` (the index card), `public/001/og.png` and `public/002/og.png`. Run it while `npm run dev` is running (set `OG_BASE` to the dev URL including any base path, e.g. `http://localhost:43117/everydays`). Day 001 is driven on a fake clock so its screenshot comes out the same every run; `OG_FRAME` picks a different frame of the sweep. Day 002 presses a few bubbles in the real WebGPU sim (headless Chromium with SwiftShader, so it takes a few minutes). `OG_ONLY=index,002` rebuilds only the listed cards.
+`npm run og` regenerates `public/og.png` (the index card), `public/001/og.png` and `public/002/og.png`. Run it while `vp dev` is running (set `OG_BASE` to the dev URL including any base path, e.g. `http://localhost:43117/everydays`). Day 001 is driven on a fake clock so its screenshot comes out the same every run; `OG_FRAME` picks a different frame of the sweep. Day 002 presses a few bubbles in the real WebGPU sim (headless Chromium with SwiftShader, so it takes a few minutes). `OG_ONLY=index,002` rebuilds only the listed cards.
 
 If the base URL has a path (e.g. `https://umar-ahmed.github.io/everydays`), that path also becomes Vite's `base`, so assets and links are served from `/everydays/`. In code, build in-site links from `import.meta.env.BASE_URL` rather than a leading `/`.
 
 ## Deploying
 
-The site is live at <https://umar-ahmed.github.io/everydays/>. `.github/workflows/pages.yml` builds and deploys it to GitHub Pages on every push to `main`, with `SITE_URL` set to the Pages URL.
+The site is live at <https://umar-ahmed.github.io/everydays/>. `.github/workflows/pages.yml` runs `vp check`, `vp test` and `vp run check:gpu`, then builds with `vp build` and deploys to GitHub Pages on every push to `main`, with `SITE_URL` set to the Pages URL.
 
-`vercel.json` sets the build to `npm run build` with output in `dist/`. Any static host that serves `dist/` works.
+`vercel.json` sets the build to `npm run build` (which runs `vp build`) with output in `dist/`. Any static host that serves `dist/` works.
