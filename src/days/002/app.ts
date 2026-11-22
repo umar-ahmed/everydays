@@ -1,11 +1,12 @@
 import * as THREE from 'three/webgpu'
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import { PopSynth } from './audio.ts'
 import { FOV, TABLE_GAP, fitCamera } from './camera.ts'
 import { FilmLook } from './materials.ts'
+import { MAX_RENDER_VERTS, RenderSurface, renderIndex } from './render.ts'
 import { LatticeGenerator, type Shape, type Tiling } from './generators/lattice.ts'
-import { buildSheetFromMap, layoutFor, MAX_VERTS, type Sheet } from './sheet.ts'
+import { buildSheetFromMap, layoutFor, type Sheet } from './sheet.ts'
 import { BubbleSim } from './sim.ts'
+import { StudioPipeline, studioEnvironment } from './studio.ts'
 
 export type SheetParams = { shape: Shape; tiling: Tiling; size: number; spacing: number; cols: number; pinholeChance: number }
 
@@ -23,14 +24,36 @@ export type Params = SheetParams & {
   wrinkle: number
   wrinkleScale: number
   sharpness: number
-  light: number
-  rim: number
+  /** Studio: strip-box and rim/kicker intensities, rotation of the whole rig (degrees). */
+  keyStrip: number
+  rimLight: number
+  lightRotation: number
+  background: 'black' | 'dark gray'
+  /** Camera: exposure, depth of field 0..1, focus on the pointer, bloom, grain, vignette. */
+  exposure: number
+  dof: number
+  focusFollows: boolean
+  bloom: number
+  grain: number
+  vignette: number
   volume: number
   pitch: number
   reducedMotion: boolean
   simulation: 'running' | 'paused' | 'rest pose'
   view: 'shaded' | 'normals' | 'wireframe' | 'map'
+  /** Render vertices per sim segment. */
+  detail: 1 | 2 | 4
+  texture: 'none' | 'grid' | 'dots'
+  textureScale: number
+  textureDepth: number
+  textureSharpness: number
+  tint: 'clear' | 'pink' | 'blue' | 'custom'
+  tintColor: string
+  density: number
 }
+
+/** Transmittance of one film pass for each tint preset (pink anti-static and blue PE). */
+const TINTS = { clear: '#ffffff', pink: '#ffb0d6', blue: '#a8d0ff' } as const
 
 export type Stats = { popped: number; total: number }
 
@@ -66,8 +89,15 @@ export class BubbleWrapApp {
   private rim = new THREE.DirectionalLight(0xdfe9ff, 1)
   private fill = new THREE.DirectionalLight(0xfff3e6, 0.35)
   private ring: THREE.Mesh
+  private table: THREE.Mesh | null = null
+  private post: StudioPipeline | null = null
+  private envTarget: THREE.RenderTarget | null = null
+  private envKey = ''
+  private envTimer = 0
+  private focus = 20
   private mesh: THREE.Mesh | null = null
-  private look = new FilmLook(this.sim)
+  private surface = new RenderSurface(this.sim)
+  private look = new FilmLook(this.sim, this.surface)
 
   private pointer = new THREE.Vector2()
   private hovering = false
@@ -94,8 +124,9 @@ export class BubbleWrapApp {
     this.params = params
     this.renderer = new THREE.WebGPURenderer({ antialias: true })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-    this.renderer.toneMapping = THREE.NeutralToneMapping
-    this.renderer.toneMappingExposure = 1.05
+    // AgX rolls the hard strip-light highlights off instead of clipping them flat.
+    this.renderer.toneMapping = THREE.AgXToneMapping
+    this.renderer.toneMappingExposure = 1
     const canvas = this.renderer.domElement
     canvas.style.display = 'block'
     canvas.style.width = '100%'
@@ -116,22 +147,23 @@ export class BubbleWrapApp {
     if (this.disposed) return
 
     const { scene } = this
-    scene.background = new THREE.Color(0x1d1e21)
-    const pmrem = new THREE.PMREMGenerator(this.renderer)
-    scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
+    scene.background = new THREE.Color(0, 0, 0)
+    this.post = new StudioPipeline(this.renderer, scene, this.camera)
 
     // Subdivided so no single triangle reaches far behind the camera and gets clipped by the
     // near plane, which costs the clipped triangle depth interpolation precision.
     const table = new THREE.Mesh(new THREE.PlaneGeometry(600, 600, 60, 60).rotateX(-Math.PI / 2), this.look.table)
     table.position.y = -TABLE_GAP
     scene.add(table)
+    this.table = table
 
     this.key.position.set(-7, 14, 9)
     this.rim.position.set(5, 4, -14)
     this.fill.position.set(10, 3, 6)
     scene.add(this.key, this.rim, this.fill)
 
-    this.geometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(MAX_VERTS * 3), 3))
+    // Positions come from the render surface's storage buffer; this only sizes the vertex range.
+    this.geometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(MAX_RENDER_VERTS * 3), 3))
     const mesh = new THREE.Mesh(this.geometry, this.look.film)
     mesh.frustumCulled = false
     mesh.renderOrder = 1
@@ -188,8 +220,7 @@ export class BubbleWrapApp {
     // Domes focus the key light onto the table on the side away from it.
     const away = new THREE.Vector2(-this.key.position.x, -this.key.position.z).normalize()
     look.spot.value.copy(away).multiplyScalar(sheet.domeHeight * 0.55)
-    this.geometry.setIndex(new THREE.BufferAttribute(sheet.index, 1))
-    this.geometry.setDrawRange(0, sheet.index.length)
+    this.configureSurface()
     this.seen = new Uint8Array(sheet.count)
     // Rebuilds run inside React's synchronous flush of a dial change; reporting from there nests
     // a state update per slider step and trips React's update-depth limit under rapid input.
@@ -197,7 +228,19 @@ export class BubbleWrapApp {
     queueMicrotask(() => this.onStats({ popped: 0, total }))
   }
 
+  private detail = 0
+
+  private configureSurface() {
+    const detail = this.params.detail
+    this.detail = detail
+    const { RW, RH } = this.surface.configure(this.sheet, detail)
+    const index = renderIndex(RW, RH)
+    this.geometry.setIndex(new THREE.BufferAttribute(index, 1))
+    this.geometry.setDrawRange(0, index.length)
+  }
+
   private apply(p: Params) {
+    if (p.detail !== this.detail) this.configureSurface()
     this.sim.setParams(p, this.sheet)
     const { look } = this
     look.thickness.value = p.thickness
@@ -206,14 +249,41 @@ export class BubbleWrapApp {
     look.wrinkle.value = p.wrinkle
     look.wrinkleScale.value = p.wrinkleScale
     look.sharpness.value = p.sharpness
-    look.caustics.value = p.light
-    this.key.intensity = 2.2 * p.light
-    this.fill.intensity = 0.5 * p.light
-    this.rim.intensity = p.rim
-    this.scene.environmentIntensity = 0.9 * p.light
+    // The table and its caustics only exist in the dark-gray comparison mode.
+    const field = p.background === 'black'
+    if (this.table) this.table.visible = !field
+    this.scene.background = new THREE.Color(field ? 0x000000 : 0x1d1e21)
+    look.caustics.value = field ? 0 : p.keyStrip / 3
+    look.texture.value = ['none', 'grid', 'dots'].indexOf(p.texture)
+    look.textureScale.value = p.textureScale
+    look.textureDepth.value = p.textureDepth
+    look.textureSharpness.value = p.textureSharpness
+    look.bubbleSize.value = this.sheet.size
+    const tint = new THREE.Color()
+    try {
+      tint.setStyle(p.tint === 'custom' ? p.tintColor : TINTS[p.tint])
+    } catch {
+      tint.set(0xffffff)
+    }
+    // The picked (sRGB) colour reads as the per-pass transmittance, so a light pink stays light.
+    tint.convertLinearToSRGB()
+    look.tint.value.set(tint.r, tint.g, tint.b)
+    look.density.value = p.density
+    // The strip boxes and kickers live in the environment; the punctual lights add the sharpest glints.
+    this.key.intensity = 0.25 * p.keyStrip
+    this.fill.intensity = 0
+    this.rim.intensity = p.rimLight
+    const turn = THREE.MathUtils.degToRad(p.lightRotation)
+    this.scene.environmentRotation.set(0, turn, 0)
+    this.key.position.set(-7, 14, 9).applyAxisAngle(new THREE.Vector3(0, 1, 0), turn)
+    this.rim.position.set(5, 4, -14).applyAxisAngle(new THREE.Vector3(0, 1, 0), turn)
+    this.renderer.toneMappingExposure = p.exposure
+    this.post?.configure({ dof: p.dof, bloom: p.bloom, grain: p.reducedMotion ? 0 : p.grain, vignette: p.vignette })
+    this.scheduleEnvironment(p)
     this.synth.volume = p.volume
     this.synth.pitch = p.pitch
     look.restPose.value = p.simulation === 'rest pose' ? 1 : 0
+    this.surface.restPose.value = look.restPose.value
     if (this.mesh) {
       const views = { shaded: look.film, normals: look.normals, wireframe: look.wireframe, map: look.mapView }
       this.mesh.material = views[p.view]
@@ -241,6 +311,23 @@ export class BubbleWrapApp {
     const { dist } = fit
     this.camera.position.set(Math.sin(az) * Math.cos(el) * dist, Math.sin(el) * dist, Math.cos(az) * Math.cos(el) * dist)
     this.camera.lookAt(...fit.target)
+  }
+
+  /** Rebake the studio environment when its intensities change, debounced for slider drags. */
+  private scheduleEnvironment(p: Params) {
+    const key = `${p.keyStrip}/${p.rimLight}`
+    if (key === this.envKey) return
+    this.envKey = key
+    window.clearTimeout(this.envTimer)
+    const bake = () => {
+      if (this.disposed) return
+      const old = this.envTarget
+      this.envTarget = studioEnvironment(this.renderer, { key: p.keyStrip, rim: p.rimLight })
+      this.scene.environment = this.envTarget.texture
+      old?.dispose()
+    }
+    if (!this.envTarget) bake()
+    else this.envTimer = window.setTimeout(bake, 120)
   }
 
   private onDown = (e: PointerEvent) => {
@@ -295,7 +382,21 @@ export class BubbleWrapApp {
 
     if (live) sim.step(this.renderer, dt, params.substeps)
     else this.synth.hiss(0)
-    this.renderer.render(this.scene, this.camera)
+    this.surface.update(this.renderer)
+    // Focus where you look: the pointer's spot on the sheet, else the sheet's middle.
+    const focusAt = params.focusFollows && onSheet ? this.hit : new THREE.Vector3(0, 0, 0)
+    const forward = this.camera.getWorldDirection(new THREE.Vector3())
+    const want = focusAt.clone().sub(this.camera.position).dot(forward)
+    this.focus += (want - this.focus) * (params.reducedMotion ? 1 : 1 - Math.exp(-dt * 8))
+    // Debug views show raw data, so they skip depth of field, bloom, grain and the vignette.
+    if (this.post && params.view === 'shaded') {
+      this.post.focus.value = this.focus
+      // Depth of field in world units: about a third of the sheet's depth stays sharp.
+      this.post.focalLength.value = sheet.depth * 0.35
+      this.post.render()
+    } else {
+      this.renderer.render(this.scene, this.camera)
+    }
     if (live) this.pollPops()
   }
 
@@ -347,6 +448,9 @@ export class BubbleWrapApp {
     window.removeEventListener('pointerup', this.onUp)
     window.removeEventListener('pointercancel', this.onUp)
     this.synth.dispose()
+    window.clearTimeout(this.envTimer)
+    this.envTarget?.dispose()
+    this.post?.dispose()
     this.renderer.dispose()
     canvas.remove()
   }

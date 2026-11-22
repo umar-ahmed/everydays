@@ -4,6 +4,7 @@ import { instancedArray } from 'three/tsl'
 import * as THREE from 'three/webgpu'
 import { TABLE_GAP, depthStep, fitCamera } from '../../src/days/002/camera.ts'
 import { LatticeGenerator, SHAPES, TILINGS } from '../../src/days/002/generators/lattice.ts'
+import { DETAILS, MAX_DETAIL, MAX_RENDER_VERTS, renderSize } from '../../src/days/002/render.ts'
 import { MAX_BUBBLES, MAX_MAP, MAX_QUADS, MAX_VERTS, buildSheetFromMap, layoutFor } from '../../src/days/002/sheet.ts'
 
 const GRID = [4, 11, 20]
@@ -21,6 +22,13 @@ async function run(): Promise<Result> {
   const generator = new LatticeGenerator(mapRaw)
   const failures: string[] = []
   const counts: Record<string, number[]> = {}
+  // Device limits the render surface has to fit (WebGPU defaults are 128 MiB bindings, 256 MiB buffers).
+  const limits = (renderer.backend as unknown as { device: GPUDevice }).device.limits
+  const storageBytes = MAX_RENDER_VERTS * 16
+  if (storageBytes > limits.maxStorageBufferBindingSize) {
+    failures.push(`render storage buffers ${storageBytes} B > maxStorageBufferBindingSize ${limits.maxStorageBufferBindingSize}`)
+  }
+  let worstRender = { verts: 0, indexBytes: 0 }
   let configs = 0
   let worstDepth = 0
   let minGapRatio = Infinity
@@ -97,6 +105,16 @@ async function run(): Promise<Result> {
               if (error > 1.5) fail(`nearest neighbours ${nearest.toFixed(3)} cm apart, pitch ${layout.pitch.toFixed(3)}`)
             }
 
+            // Render surface at every detail level, including the 4x maximum.
+            for (const detail of DETAILS) {
+              const { RW, RH } = renderSize(sheet.W, sheet.H, detail)
+              const rVerts = RW * RH
+              const indexBytes = (RW - 1) * (RH - 1) * 6 * 4
+              if (rVerts > MAX_RENDER_VERTS) fail(`${detail}x render surface ${rVerts} vertices > ${MAX_RENDER_VERTS}`)
+              if (indexBytes > limits.maxBufferSize) fail(`${detail}x index buffer ${indexBytes} B > maxBufferSize`)
+              if (detail === MAX_DETAIL && rVerts > worstRender.verts) worstRender = { verts: rVerts, indexBytes }
+            }
+
             // Rest normals.
             let badNormals = 0
             for (let v = 0; v < verts; v++) {
@@ -143,6 +161,7 @@ async function run(): Promise<Result> {
       'bubbles hexagonal grid=20': range('hexagonal grid=20'),
       'nearest-neighbour / pitch (min)': minGapRatio.toFixed(4),
       'tightest depth margin': `${(DEPTH_MARGIN / worstDepth).toFixed(0)}x`,
+      'render 4x max': `${worstRender.verts} / ${MAX_RENDER_VERTS} vertices, index ${(worstRender.indexBytes / 2 ** 20).toFixed(1)} MiB, storage ${(storageBytes / 2 ** 20).toFixed(1)} MiB per buffer`,
     },
   }
 }

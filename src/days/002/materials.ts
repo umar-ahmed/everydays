@@ -1,4 +1,7 @@
 import {
+  log,
+  sqrt,
+  cameraPosition,
   Fn,
   abs,
   clamp,
@@ -13,6 +16,7 @@ import {
   fwidth,
   int,
   length,
+  max,
   mix,
   mx_noise_float,
   normalize,
@@ -31,18 +35,29 @@ import {
 } from 'three/tsl'
 import * as THREE from 'three/webgpu'
 import type { Node } from 'three/webgpu'
+import type { RenderSurface } from './render.ts'
 import type { BubbleSim } from './sim.ts'
 
 
 export class FilmLook {
   readonly thickness = uniform(420)
   readonly iridescence = uniform(0.35)
-  readonly haze = uniform(0.16)
+  readonly haze = uniform(0.08)
   readonly wrinkle = uniform(0.45)
   readonly wrinkleScale = uniform(1)
   readonly sharpness = uniform(0.4)
   /** Refraction depth of a full dome, cm: each dome reads as a small lens. */
   readonly lens = uniform(0.4)
+
+  /** Embossed film texture: 0 none, 1 grid, 2 dots. Period is size / (10 * scale). */
+  readonly texture = uniform(0, 'int')
+  readonly textureScale = uniform(1)
+  readonly textureDepth = uniform(0.5)
+  readonly textureSharpness = uniform(0.5)
+  readonly bubbleSize = uniform(1.1)
+  /** Beer-Lambert tint: transmittance colour for one film pass, raised to the Density power. */
+  readonly tint = uniform(new THREE.Vector3(1, 1, 1))
+  readonly density = uniform(1)
 
   /** Offset of each dome's focused spot on the table, away from the key light (cm). */
   readonly spot = uniform(new THREE.Vector2(0.2, 0.15))
@@ -60,7 +75,10 @@ export class FilmLook {
   /** 1 renders the sheet builder's rest geometry with no sim output (Debug > Simulation). */
   readonly restPose = uniform(0)
 
-  constructor(sim: BubbleSim) {
+  private surface: RenderSurface
+
+  constructor(sim: BubbleSim, surface: RenderSurface) {
+    this.surface = surface
     this.film = this.makeFilm(sim)
     this.table = this.makeTable(sim)
     const position = this.position(sim)
@@ -76,13 +94,14 @@ export class FilmLook {
     return this.restPose.lessThan(0.5)
   }
 
-  private position(sim: BubbleSim) {
-    return select(this.live(), sim.x.element(vertexIndex).xyz, sim.rest.element(vertexIndex).xyz)
+  // The render surface already folds rest pose in (no sim displacement), so every view reads it.
+  private position(_sim: BubbleSim) {
+    return this.surface.pos.element(vertexIndex).xyz
   }
 
-  /** xyz normal, w compression; rest normals carry w = 0. */
-  private normal(sim: BubbleSim) {
-    return select(this.live(), sim.normal.element(vertexIndex), sim.restNormal.element(vertexIndex))
+  /** xyz normal, w compression (0 in rest pose). */
+  private normal(_sim: BubbleSim) {
+    return this.surface.normal.element(vertexIndex)
   }
 
   /**
@@ -105,10 +124,12 @@ export class FilmLook {
     })
     film.positionNode = this.position(sim)
     const n = varying(this.normal(sim))
-    const dome = varying(sim.rest.element(vertexIndex).w)
-    const inside = varying(sim.meta.element(vertexIndex).y)
-    const restXZ = varying(sim.rest.element(vertexIndex).xz)
-    const popped = varying(select(this.live(), sim.pops.element(int(sim.meta.element(vertexIndex).x)).x, float(0)))
+    const info = this.surface.info.element(vertexIndex)
+    const dome = varying(this.surface.rest.element(vertexIndex).w)
+    const inside = varying(info.y)
+    const restXZ = varying(this.surface.rest.element(vertexIndex).xz)
+    const bubble = int(max(info.x, 0))
+    const popped = varying(select(this.live().and(info.x.greaterThanEqual(0)), sim.pops.element(bubble).x, float(0)))
 
     // Creases: anisotropic ridged noise whose direction drifts across the film.
     const sharp = mix(float(1.5), float(9), this.sharpness)
@@ -137,14 +158,58 @@ export class FilmLook {
     const hu = crease(restXZ.add(vec2(eps, 0)))
     const hv = crease(restXZ.add(vec2(0, eps)))
     const amp = this.wrinkle.mul(mask).mul(resolved).mul(0.006)
+    const wrinkleGrad = vec2(hu.sub(h0), hv.sub(h0)).div(eps).mul(amp)
+
+    // Embossed texture in dome-local coordinates (rest position minus the bubble's map center),
+    // so it sits on each bubble and stretches with the film. Analytic gradients, faded by the
+    // pixel footprint so the pattern never aliases.
+    const center = varying(select(info.x.greaterThanEqual(0), sim.centers.element(bubble).xy, vec2(0)))
+    const local = restXZ.sub(center)
+    const freq = this.textureScale.mul(10).div(this.bubbleSize)
+    const cycles = fwidth(local.x).add(fwidth(local.y)).mul(freq)
+    const k = mix(float(2), float(24), this.textureSharpness)
+    const texFade = smoothstep(0.45, 0.12, cycles.mul(this.textureSharpness.mul(1.5).add(1)))
+    const texMask = mix(float(0.25), float(1), inside).mul(texFade).mul(this.textureDepth)
+    // Crosshatch ridges: r(t) = (0.5 + 0.5 cos 2 pi f t)^k along each axis.
+    const ridge = (t: Node<'float'>) => {
+      const c = cos(t.mul(freq).mul(2 * Math.PI)).mul(0.5).add(0.5)
+      const slope = pow(max(c, 1e-4), k.sub(1)).mul(k).mul(sin(t.mul(freq).mul(2 * Math.PI)).mul(-Math.PI)).mul(freq)
+      return { h: pow(c, k), slope }
+    }
+    const rx = ridge(local.x)
+    const ry = ridge(local.y)
+    const gridGrad = vec2(rx.slope, ry.slope).mul(texMask.mul(0.01).div(sqrt(k)))
+    const gridHeight = rx.h.add(ry.h).mul(texMask)
+    // Dimples on offset rows: h = -exp(-k r^2), r measured in cells.
+    const row = floor(local.y.mul(freq))
+    const shift = row.sub(floor(row.mul(0.5)).mul(2)).mul(0.5)
+    const d = vec2(fract(local.x.mul(freq).add(shift)), fract(local.y.mul(freq))).sub(0.5).div(0.32)
+    const e = exp(dot(d, d).mul(k.mul(-0.5)))
+    const dotsGrad = d.mul(e).mul(k).mul(freq).div(0.32).mul(texMask.mul(0.012).div(sqrt(k)))
+    const dotsHeight = e.mul(texMask)
+    const isGrid = this.texture.equal(1)
+    const isDots = this.texture.equal(2)
+    const grad = wrinkleGrad.add(select(isGrid, gridGrad, select(isDots, dotsGrad, vec2(0))))
+    const texHeight = select(isGrid, gridHeight, select(isDots, dotsHeight, float(0)))
+
     const N = normalize(n.xyz)
     const T = normalize(vec3(1, 0, 0).sub(N.mul(N.x)))
     const B = cross(N, T)
-    const bent = normalize(N.sub(T.mul(hu.sub(h0).div(eps).mul(amp))).sub(B.mul(hv.sub(h0).div(eps).mul(amp))))
+    const bent = normalize(N.sub(T.mul(grad.x)).sub(B.mul(grad.y)))
     film.normalNode = transformNormalToView(bent).normalize().mul(faceDirection)
-    film.roughnessNode = this.haze.add(h0.mul(this.wrinkle).mul(mask).mul(mix(float(0.04), float(0.12), resolved)))
-    // Clear PE scatters almost nothing diffusely; the laminated flat film is only a touch milkier.
-    film.transmissionNode = mix(float(0.965), float(1), dome)
+    // Emboss ridges glint: a touch smoother than the surrounding haze.
+    film.roughnessNode = max(
+      this.haze.add(h0.mul(this.wrinkle).mul(mask).mul(mix(float(0.04), float(0.12), resolved))).sub(texHeight.mul(0.06)),
+      0.02,
+    )
+    // Beer-Lambert: transmittance exp(-sigma L), with the path length L growing at grazing angles;
+    // overlapping layers multiply on their own. Clear film has sigma = 0.
+    const sigma = log(max(this.tint, vec3(0.01))).negate().mul(this.density)
+    const view = normalize(cameraPosition.sub(positionWorld))
+    const path = float(1).div(max(abs(dot(bent, view)), 0.15))
+    film.colorNode = exp(sigma.mul(path).negate())
+    // Clear PE scatters almost nothing diffusely: on black, any diffuse share turns the film gray.
+    film.transmissionNode = float(1)
     film.thicknessNode = dome.mul(this.lens).mul(oneMinus(popped.mul(0.8)))
     film.iridescenceNode = this.iridescence
     // Thermoforming stretches the domes thinner than the flat base; noise breaks up the bands.
@@ -178,7 +243,7 @@ export class FilmLook {
   private makeMapView(sim: BubbleSim) {
     const view = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide })
     view.positionNode = this.position(sim)
-    const { texel, id } = mapAt(sim, varying(sim.rest.element(vertexIndex).xz))
+    const { texel, id } = mapAt(sim, varying(this.surface.rest.element(vertexIndex).xz))
     const sd = texel.y
     const k = float(id)
     const hue = vec3(fract(sin(k.mul(12.9898)).mul(43758.5)), fract(sin(k.mul(78.233)).mul(12543.1)), fract(sin(k.mul(39.425)).mul(24634.6)))

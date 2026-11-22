@@ -27,12 +27,32 @@ const dialConfig = {
   look: {
     'film thickness': [420, 100, 1000, 10],
     iridescence: [0.35, 0, 1, 0.01],
-    haze: [0.16, 0, 0.6, 0.01],
+    haze: [0.08, 0, 0.6, 0.01],
     'wrinkle strength': [0.45, 0, 1.5, 0.01],
     'wrinkle scale': [1, 0.3, 3, 0.05],
     'crease sharpness': [0.4, 0, 1, 0.01],
-    light: [1.2, 0, 3, 0.05],
-    rim: [2.2, 0, 6, 0.05],
+    'render detail': { type: 'select', options: ['1x', '2x', '4x'], default: '2x' },
+    texture: { type: 'select', options: ['none', 'grid', 'dots'], default: 'none' },
+    'texture scale': [1, 0.4, 3, 0.05],
+    'texture depth': [0.6, 0, 2, 0.01],
+    'texture sharpness': [0.5, 0, 1, 0.01],
+    tint: { type: 'select', options: ['clear', 'pink', 'blue', 'custom'], default: 'clear' },
+    'tint color': { type: 'color', default: '#ff9ccc' },
+    density: [1, 0, 4, 0.05],
+  },
+  studio: {
+    'key strip': [3, 0, 8, 0.05],
+    'rim intensity': [2.5, 0, 8, 0.05],
+    'light rotation': [0, -180, 180, 1],
+    background: { type: 'select', options: ['black', 'dark gray'], default: 'black' },
+  },
+  camera: {
+    exposure: [1, 0.2, 3, 0.01],
+    'dof amount': [0.35, 0, 1, 0.01],
+    'focus follows pointer': true,
+    bloom: [0.3, 0, 2, 0.01],
+    grain: [0.04, 0, 0.3, 0.005],
+    vignette: [0.3, 0, 1, 0.01],
   },
   sound: {
     'pop volume': [0.7, 0, 1, 0.01],
@@ -75,13 +95,29 @@ export function BubbleWrap() {
     wrinkle: v.look['wrinkle strength'],
     wrinkleScale: v.look['wrinkle scale'],
     sharpness: v.look['crease sharpness'],
-    light: v.look.light,
-    rim: v.look.rim,
+    keyStrip: v.studio['key strip'],
+    rimLight: v.studio['rim intensity'],
+    lightRotation: v.studio['light rotation'],
+    background: v.studio.background as Params['background'],
+    exposure: v.camera.exposure,
+    dof: v.camera['dof amount'],
+    focusFollows: v.camera['focus follows pointer'],
+    bloom: v.camera.bloom,
+    grain: v.camera.grain,
+    vignette: v.camera.vignette,
     volume: v.sound['pop volume'],
     pitch: v.sound['pop pitch'],
     reducedMotion,
     simulation: v.debug.simulation as Params['simulation'],
     view: v.debug['debug view'] as Params['view'],
+    detail: parseInt(v.look['render detail']) as Params['detail'],
+    texture: v.look.texture as Params['texture'],
+    textureScale: v.look['texture scale'],
+    textureDepth: v.look['texture depth'],
+    textureSharpness: v.look['texture sharpness'],
+    tint: v.look.tint as Params['tint'],
+    tintColor: v.look['tint color'],
+    density: v.look.density,
   }
   const paramsRef = useRef(params)
 
@@ -145,7 +181,7 @@ export function BubbleWrap() {
 
   return (
     <>
-      <main className="fixed inset-0 overflow-hidden bg-[#232427] select-none">
+      <main className="fixed inset-0 overflow-hidden bg-black select-none">
         <div ref={container} className="absolute inset-0" style={{ cursor: status === 'running' ? 'none' : 'default' }} />
 
         {status === 'loading' && (
