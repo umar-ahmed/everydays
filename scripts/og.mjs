@@ -1,17 +1,27 @@
 // Regenerates the 1200x630 Open Graph images in public/.
 // Usage: start `npm run dev`, then `npm run og` (OG_BASE overrides the dev URL,
-// OG_FRAME picks which frame of the day 001 sweep becomes the image).
-import { mkdirSync, copyFileSync } from 'node:fs'
+// OG_FRAME picks which frame of the day 001 sweep becomes the image, OG_ONLY=002 or
+// OG_ONLY=index,001 limits which cards are rebuilt).
+// Day 002 needs WebGPU; the Vulkan/SwiftShader flags make that work headless on a box
+// without a GPU (slowly: expect a few minutes).
+import { mkdirSync, copyFileSync, readFileSync } from 'node:fs'
 import { chromium } from 'playwright'
 
 const base = process.env.OG_BASE || 'http://localhost:43117'
 const pick = Number(process.env.OG_FRAME ?? 6)
 const size = { width: 1200, height: 630 }
 const framesDir = '/tmp/everydays-og-frames'
+const only = process.env.OG_ONLY ? new Set(process.env.OG_ONLY.split(',')) : null
+const want = (card) => !only || only.has(card)
+const days = [...readFileSync('src/days.ts', 'utf8').matchAll(/slug: '(\d{3})',\s*title: '([^']+)'/g)]
+const [latestSlug, latestTitle] = days.at(-1).slice(1)
 mkdirSync('public/001', { recursive: true })
+mkdirSync('public/002', { recursive: true })
 mkdirSync(framesDir, { recursive: true })
 
-const browser = await chromium.launch()
+const browser = await chromium.launch({
+  args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader', '--use-angle=swiftshader'],
+})
 
 async function indexCard() {
   const page = await browser.newPage({ viewport: size })
@@ -47,7 +57,7 @@ async function indexCard() {
     <div class="goo">${blobs.map(([x, y, d]) => `<div class="b" style="left:${x}px;top:${y}px;width:${d}px;height:${d}px"></div>`).join('')}</div>
     <div class="copy"><div class="kicker">daily interactive toys</div><h1>every<span>days</span></h1>
     <p>One small 30-minute toy a day, numbered and kept.</p></div>
-    <div class="foot">001 · gooey cursor blobs</div>
+    <div class="foot">${days.length} days · latest ${latestSlug} · ${latestTitle}</div>
   </body></html>`)
   await page.waitForTimeout(200)
   await page.screenshot({ path: 'public/og.png' })
@@ -78,7 +88,39 @@ async function day001() {
   await page.close()
 }
 
-await indexCard()
-await day001()
+async function day002() {
+  const page = await browser.newPage({ viewport: size, deviceScaleFactor: 1 })
+  await page.goto(`${base}/002/`)
+  await page.waitForFunction(() => window.bubblewrap, null, { timeout: 120000 })
+  await page.mouse.click(size.width - 37, 37)
+  await page.addStyleTag({ content: '.dialkit-root,[data-chrome]{display:none!important}' })
+  const popped = () => page.evaluate(() => window.bubblewrap.seen.reduce((a, b) => a + b, 0))
+  // Pop a loose diagonal so the card shows intact and collapsed domes side by side.
+  for (const [c, r] of [[3, 2], [4, 3], [7, 4], [8, 2], [2, 5], [6, 6]]) {
+    const at = await page.evaluate(([c, r, w, h]) => {
+      const a = window.bubblewrap
+      const s = a.sheet
+      const cell = s.width / s.cols
+      const p = a.hit.clone().set((c + 0.5) * cell - s.width / 2, s.domeHeight, (r + 0.5) * cell - s.depth / 2).project(a.camera)
+      return [((p.x + 1) / 2) * w, ((1 - p.y) / 2) * h]
+    }, [c, r, size.width, size.height])
+    const before = await popped()
+    await page.mouse.move(at[0], at[1])
+    await page.mouse.down()
+    const t = Date.now()
+    while ((await popped()) === before && Date.now() - t < 90000) await page.waitForTimeout(500)
+    await page.mouse.up()
+  }
+  await page.evaluate(() => {
+    window.bubblewrap.hovering = false
+  })
+  await page.waitForTimeout(8000)
+  await page.screenshot({ path: 'public/002/og.png' })
+  await page.close()
+}
+
+if (want('index')) await indexCard()
+if (want('001')) await day001()
+if (want('002')) await day002()
 await browser.close()
-console.log(`wrote public/og.png and public/001/og.png (frame ${pick}; all frames in ${framesDir})`)
+console.log(`wrote ${only ? [...only].join(', ') : 'index, 001, 002'} cards (day 001 frame ${pick}; frames in ${framesDir})`)
