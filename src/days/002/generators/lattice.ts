@@ -22,7 +22,7 @@ import {
   vec4,
 } from 'three/tsl'
 import type { Node, StorageBufferNode } from 'three/webgpu'
-import type { Layout } from '../layout.ts'
+import type { Lattice, Layout } from '../layout.ts'
 import type { MapGenerator } from './index.ts'
 
 export const SHAPES = ['circle', 'square', 'hexagon', 'star', 'heart', 'triangle'] as const
@@ -92,6 +92,25 @@ const triangle = (p: V2) => {
 }
 
 const SDFS = [circle, square, hexagon, star, heart, triangle]
+
+/** Honeycomb holes: axial (c - r/2, r) sites whose axial difference is a multiple of 3. */
+const isHole = (c: number, r: number) => (((c - Math.floor(r / 2) - r) % 3) + 3) % 3 === 0
+
+/** Row geometry and exact site count per tiling, for sizing the sheet before the map exists. */
+export function latticeFor(tiling: Tiling): Lattice {
+  if (tiling === 'square') return { rowStep: 1, rowShift: 0, count: (cols, rows) => cols * rows }
+  const rowStep = Math.sqrt(3) / 2
+  if (tiling === 'triangular') return { rowStep, rowShift: 0.5, count: (cols, rows) => cols * rows }
+  return {
+    rowStep,
+    rowShift: 0.5,
+    count: (cols, rows) => {
+      let n = 0
+      for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) if (!isHole(c, r)) n++
+      return n
+    },
+  }
+}
 
 /**
  * Lattice generator: bubble centers on a square, triangular (offset rows at pitch * sqrt(3)/2,
@@ -172,18 +191,11 @@ export class LatticeGenerator implements MapGenerator<LatticeOptions> {
   }
 
   configure(layout: Layout, { tiling, shape }: LatticeOptions) {
-    const t = TILINGS.indexOf(tiling)
-    const { pitch, size, width, depth } = layout
-    // Bounding radius of every footprint (all shapes fit the unit circle) plus a texel of slack.
-    const fit = size / 2 + layout.texel
-    const rowStep = t === 0 ? pitch : (pitch * Math.sqrt(3)) / 2
-    const rowShift = t === 0 ? 0 : pitch / 2
-    const rows = Math.max(0, Math.floor((depth - 2 * fit) / rowStep) + 1)
-    const cols = Math.max(0, Math.floor((width - 2 * fit - rowShift) / pitch) + 1)
-    // Center the used part of the lattice on the sheet.
+    const { pitch, size, width, depth, cols, rows, rowStep, rowShift } = layout
+    // Center the lattice on the sheet; the layout already sized the sheet to fit cols x rows.
     const spanX = (cols - 1) * pitch + (rows > 1 ? rowShift : 0)
     const spanZ = (rows - 1) * rowStep
-    this.tiling.value = t
+    this.tiling.value = TILINGS.indexOf(tiling)
     this.shape.value = SHAPES.indexOf(shape)
     this.mapW.value = layout.mapW
     this.texel.value = layout.texel

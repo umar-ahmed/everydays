@@ -21,7 +21,7 @@ try {
     console.error(result.error)
   } else {
     const seconds = ((Date.now() - started) / 1000).toFixed(0)
-    console.log(`checked ${result.configs} map-driven sheets (3 tilings x 6 shapes x grid/size/spacing) in ${seconds}s`)
+    console.log(`checked ${result.configs} map-driven sheets (5 viewports x 3 tilings x 6 shapes x bubbles-across/size/spacing) in ${seconds}s`)
     for (const [k, v] of Object.entries(result.summary)) console.log(`  ${k}: ${v}`)
     if (result.failures.length) {
       console.error(result.failures.slice(0, 25).join('\n'))

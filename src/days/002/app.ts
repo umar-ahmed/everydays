@@ -1,16 +1,27 @@
 import * as THREE from 'three/webgpu'
 import { PopSynth } from './audio.ts'
-import { FOV, TABLE_GAP, fitCamera } from './camera.ts'
+import { FOV, TABLE_GAP, type CameraFit, type View, cameraPosition, clipPlanes, fitView, sheetAspect, viewDepth } from './camera.ts'
 import { FilmLook } from './materials.ts'
 import { MAX_RENDER_VERTS, RenderSurface, backIndex, renderIndex } from './render.ts'
-import { LatticeGenerator, type Shape, type Tiling } from './generators/lattice.ts'
-import { buildSheetFromMap, layoutFor, type Sheet } from './sheet.ts'
+import { LatticeGenerator, latticeFor, type Shape, type Tiling } from './generators/lattice.ts'
+import { FULL_BUDGET, PHONE_BUDGET, buildSheetFromMap, layoutFor, type Sheet } from './sheet.ts'
 import { BubbleSim } from './sim.ts'
 import { StudioPipeline, studioEnvironment } from './studio.ts'
+import { ViewController } from './view.ts'
 
-export type SheetParams = { shape: Shape; tiling: Tiling; size: number; spacing: number; cols: number; pinholeChance: number }
+export type SheetParams = {
+  shape: Shape
+  tiling: Tiling
+  size: number
+  spacing: number
+  /** Bubbles along the sheet's shorter side; the longer side follows the viewport. */
+  across: number
+  pinholeChance: number
+}
 
 export type Params = SheetParams & {
+  /** Press pushes on the sheet; View pans, zooms and orbits the camera instead. */
+  mode: 'press' | 'view'
   fill: number
   threshold: number
   stiffness: number
@@ -63,7 +74,7 @@ export type Params = SheetParams & {
 /** Transmittance of one film pass for each tint preset (pink anti-static and blue PE). */
 const TINTS = { clear: '#ffffff', pink: '#ffb0d6', blue: '#a8d0ff' } as const
 
-export type Stats = { popped: number; total: number }
+export type Stats = { popped: number; total: number; viewMoved: boolean }
 
 export async function webgpuAvailable() {
   if (!('gpu' in navigator) || !navigator.gpu) return false
@@ -79,7 +90,7 @@ const sameSheet = (a: SheetParams, b: SheetParams) =>
   a.tiling === b.tiling &&
   a.size === b.size &&
   a.spacing === b.spacing &&
-  a.cols === b.cols &&
+  a.across === b.across &&
   a.pinholeChance === b.pinholeChance
 
 export class BubbleWrapApp {
@@ -124,6 +135,17 @@ export class BubbleWrapApp {
   private last = performance.now()
   private disposed = false
   private resize = new ResizeObserver(() => this.fit())
+  private viewport: View = { width: 1, height: 1 }
+  /** The viewport-derived width / depth the current sheet was built for. */
+  private builtAspect = 0
+  private resizeTimer = 0
+  private framing: { key: string; fit: CameraFit } | null = null
+  private offsetKey = ''
+  private controls = new ViewController()
+  private viewMoved = false
+  /** Phones (coarse pointer, small screen) get a smaller cloth and bubble budget. */
+  private budget =
+    window.matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 600 ? PHONE_BUDGET : FULL_BUDGET
 
   private container: HTMLElement
   private onStats: (s: Stats) => void
@@ -132,7 +154,9 @@ export class BubbleWrapApp {
     this.container = container
     this.onStats = onStats
     this.params = params
-    this.renderer = new THREE.WebGPURenderer({ antialias: true })
+    // Reversed-Z float depth keeps the 0.002 cm film/back/table gaps apart from macro close-ups
+    // to grazing views across the whole sheet; a standard 24-bit buffer runs out at macro zoom.
+    this.renderer = new THREE.WebGPURenderer({ antialias: true, reversedDepthBuffer: true })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     // AgX rolls the hard strip-light highlights off instead of clipping them flat.
     this.renderer.toneMapping = THREE.AgXToneMapping
@@ -187,6 +211,7 @@ export class BubbleWrapApp {
     scene.add(mesh, this.ring)
     this.mesh = mesh
 
+    this.fit()
     await this.rebuild(this.params)
     if (this.disposed) return
 
@@ -194,15 +219,21 @@ export class BubbleWrapApp {
     canvas.addEventListener('pointerdown', this.onDown)
     canvas.addEventListener('pointermove', this.onMove)
     canvas.addEventListener('pointerleave', this.onLeave)
+    canvas.addEventListener('wheel', this.onWheel, { passive: false })
+    canvas.addEventListener('contextmenu', this.onContextMenu)
     window.addEventListener('pointerup', this.onUp)
     window.addEventListener('pointercancel', this.onUp)
     this.resize.observe(this.container)
-    this.fit()
     this.renderer.setAnimationLoop(this.frame)
   }
 
   setParams(params: Params) {
     const rebuild = !sameSheet(params, this.params)
+    if (params.mode !== this.params.mode) {
+      // Switching mid-gesture must not leave a press or a drag stuck on.
+      this.controls.cancel()
+      this.pressed = false
+    }
     this.params = params
     // The old sheet keeps running until the new map has been generated and read back.
     if (rebuild && this.sheet) void this.rebuild(params)
@@ -212,14 +243,19 @@ export class BubbleWrapApp {
   /** Generate the bubble map on the GPU, read it back once, and build the sheet from it. */
   private async rebuild(params: Params) {
     const build = ++this.builds
-    const layout = layoutFor(params)
+    const aspect = sheetAspect(this.viewport)
+    const layout = layoutFor({ ...params, aspect, lattice: latticeFor(params.tiling), budget: this.budget })
     this.generator.configure(layout, params)
     this.renderer.compute(this.generator.compute)
     const buf = await this.renderer.getArrayBufferAsync(this.sim.mapRaw.value, null, 0, layout.mapW * layout.mapH * 16)
     // A newer dial change superseded this build while it was on the GPU.
     if (build !== this.builds || this.disposed) return
     const sheet = buildSheetFromMap({ layout, raw: new Float32Array(buf), pinholeChance: params.pinholeChance })
+    const reshaped = this.sheet && Math.abs(Math.log(aspect / this.builtAspect)) > 1e-3
+    this.builtAspect = aspect
     this.sheet = sheet
+    // A differently shaped sheet invalidates the user's framing; a dial rebuild keeps it.
+    if (reshaped) this.controls.reset()
     this.loadSheet(sheet)
     this.apply(this.params)
   }
@@ -227,6 +263,11 @@ export class BubbleWrapApp {
   reset() {
     this.loadSheet(this.sheet)
     this.apply(this.params)
+  }
+
+  /** Spring back to the auto-fit framing. */
+  resetView() {
+    this.controls.reset()
   }
 
   /** Re-rolled for every sheet (and New sheet), so each one crumples differently. */
@@ -247,7 +288,7 @@ export class BubbleWrapApp {
     // Rebuilds run inside React's synchronous flush of a dial change; reporting from there nests
     // a state update per slider step and trips React's update-depth limit under rapid input.
     const total = sheet.count
-    queueMicrotask(() => this.onStats({ popped: 0, total }))
+    queueMicrotask(() => this.onStats({ popped: 0, total, viewMoved: this.viewMoved }))
   }
 
   private detail = 0
@@ -313,6 +354,7 @@ export class BubbleWrapApp {
     this.renderer.toneMappingExposure = p.exposure
     this.post?.configure({ dof: p.dof, bloom: p.bloom, grain: p.reducedMotion ? 0 : p.grain, vignette: p.vignette })
     this.scheduleEnvironment(p)
+    this.controls.reducedMotion = p.reducedMotion
     this.synth.volume = p.volume
     this.synth.pitch = p.pitch
     look.restPose.value = p.simulation === 'rest pose' ? 1 : 0
@@ -331,21 +373,63 @@ export class BubbleWrapApp {
     this.renderer.setSize(w, h, false)
     this.camera.aspect = w / h
     this.camera.updateProjectionMatrix()
+    this.viewport = { width: w, height: h }
+    if (!this.sheet) return
+    // Rotation or a real reshape rebuilds the sheet to the new aspect (debounced, so a drag-resize
+    // or the phone's rotation animation builds once). Small changes such as a mobile URL bar
+    // sliding away only refit the camera.
+    const drift = Math.abs(Math.log(sheetAspect(this.viewport) / this.builtAspect))
+    window.clearTimeout(this.resizeTimer)
+    if (drift > Math.log(1.08)) {
+      this.resizeTimer = window.setTimeout(() => {
+        if (!this.disposed) void this.rebuild(this.params)
+      }, 250)
+    }
   }
 
-  private placeCamera(t: number) {
-    const fit = fitCamera(this.sheet.width, this.sheet.depth, this.camera.aspect, this.params.elevation)
-    if (this.camera.near !== fit.near || this.camera.far !== fit.far) {
-      this.camera.near = fit.near
-      this.camera.far = fit.far
-      this.camera.updateProjectionMatrix()
+  /** The auto-fit framing for the current sheet, viewport and elevation (cached). */
+  private framingFor(): CameraFit {
+    const { sheet, viewport, params } = this
+    const key = `${sheet.width}/${sheet.depth}/${sheet.domeHeight}/${viewport.width}/${viewport.height}/${params.elevation}`
+    if (this.framing?.key !== key) {
+      const box = { width: sheet.width, depth: sheet.depth, top: sheet.domeHeight }
+      this.framing = { key, fit: fitView(box, viewport, params.elevation) }
     }
-    const sway = this.params.reducedMotion ? 0 : 1
-    const az = THREE.MathUtils.degToRad(2.2 * Math.sin(t * 0.21)) * sway
-    const el = fit.elevation + THREE.MathUtils.degToRad(1.4 * Math.sin(t * 0.13)) * sway
-    const { dist } = fit
-    this.camera.position.set(Math.sin(az) * Math.cos(el) * dist, Math.sin(el) * dist, Math.cos(az) * Math.cos(el) * dist)
-    this.camera.lookAt(...fit.target)
+    return this.framing.fit
+  }
+
+  private placeCamera(t: number, dt: number) {
+    const fit = this.framingFor()
+    const { sheet, viewport, camera } = this
+    const box = { width: sheet.width, depth: sheet.depth, top: sheet.domeHeight }
+    this.controls.setContext(fit, box, viewport, sheet.size, sheet.domeHeight)
+    const { pose, sway } = this.controls.update(dt)
+    // The idle sway stops while the user holds a custom framing.
+    const amount = this.params.reducedMotion ? 0 : sway
+    pose.azimuth += THREE.MathUtils.degToRad(2.2 * Math.sin(t * 0.21)) * amount
+    pose.elevation += THREE.MathUtils.degToRad(1.4 * Math.sin(t * 0.13)) * amount
+    const offsetKey = `${fit.offset[0]}/${fit.offset[1]}/${viewport.width}/${viewport.height}`
+    if (offsetKey !== this.offsetKey) {
+      this.offsetKey = offsetKey
+      const { width: w, height: h } = viewport
+      camera.setViewOffset(w, h, (-fit.offset[0] * w) / 2, (fit.offset[1] * h) / 2, w, h)
+    }
+    // Clip planes follow the zoomed pose, so macro close-ups keep their depth precision.
+    const { near, far } = clipPlanes(pose, fit.offset, box, viewport, fit.far)
+    if (Math.abs(camera.near / near - 1) > 0.02 || Math.abs(camera.far / far - 1) > 0.02) {
+      camera.near = near
+      camera.far = far
+      camera.updateProjectionMatrix()
+    }
+    camera.position.set(...cameraPosition(pose))
+    camera.lookAt(...pose.target)
+    const moved = this.controls.moved
+    if (moved !== this.viewMoved) {
+      this.viewMoved = moved
+      const total = this.sheet.count
+      this.onStats({ popped: this.seen.reduce((a, b) => a + b, 0), total, viewMoved: moved })
+    }
+    return pose
   }
 
   /** Rebake the studio environment when its intensities change, debounced for slider drags. */
@@ -365,19 +449,47 @@ export class BubbleWrapApp {
     else this.envTimer = window.setTimeout(bake, 120)
   }
 
+  private local(e: PointerEvent | WheelEvent) {
+    const r = this.renderer.domElement.getBoundingClientRect()
+    return [e.clientX - r.left, e.clientY - r.top] as const
+  }
   private onDown = (e: PointerEvent) => {
     this.synth.unlock()
-    this.renderer.domElement.setPointerCapture(e.pointerId)
+    try {
+      this.renderer.domElement.setPointerCapture(e.pointerId)
+    } catch {
+      // The pointer is already gone (released before the handler ran); nothing to capture.
+    }
     this.setPointer(e)
+    if (this.params.mode === 'view') {
+      const [x, y] = this.local(e)
+      this.controls.down(e.pointerId, x, y, e.button === 2 || e.shiftKey, e.timeStamp)
+      return
+    }
     this.pressed = true
   }
-  private onMove = (e: PointerEvent) => this.setPointer(e)
-  private onUp = () => {
+  private onMove = (e: PointerEvent) => {
+    this.setPointer(e)
+    if (this.params.mode === 'view') {
+      const [x, y] = this.local(e)
+      this.controls.move(e.pointerId, x, y)
+    }
+  }
+  private onUp = (e: PointerEvent) => {
     this.pressed = false
+    this.controls.up(e.pointerId, e.timeStamp)
   }
   private onLeave = (e: PointerEvent) => {
     if (e.pointerType === 'mouse' && !this.pressed) this.hovering = false
   }
+  private onWheel = (e: WheelEvent) => {
+    if (this.params.mode !== 'view') return
+    e.preventDefault()
+    const [x, y] = this.local(e)
+    const lines = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1
+    this.controls.wheel(x, y, e.deltaY * lines, e.ctrlKey)
+  }
+  private onContextMenu = (e: Event) => e.preventDefault()
   private setPointer(e: PointerEvent) {
     const r = this.renderer.domElement.getBoundingClientRect()
     this.pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1)
@@ -396,8 +508,10 @@ export class BubbleWrapApp {
     // each frame, so going back to running starts from a normal-sized step.
     const live = params.simulation === 'running'
 
-    this.placeCamera(this.elapsed)
+    const pose = this.placeCamera(this.elapsed, dt)
     this.camera.updateMatrixWorld()
+    const viewing = params.mode === 'view'
+    this.renderer.domElement.style.cursor = viewing ? (this.controls.dragging ? 'grabbing' : 'grab') : 'none'
 
     const r = params.pressRadius * sheet.size
     this.plane.constant = -sheet.domeHeight * 0.5
@@ -405,29 +519,32 @@ export class BubbleWrapApp {
     const onSheet = this.hovering && this.raycaster.ray.intersectPlane(this.plane, this.hit) !== null
     // A pressing finger: the bottom of the sphere sinks to a depth set by Press strength.
     const bottom = Math.max(sheet.domeHeight * (1 - params.pressStrength), 0.01)
-    const pressing = this.pressed && onSheet && live
+    const pressing = this.pressed && onSheet && live && !viewing
     const target = pressing ? bottom + r : sheet.domeHeight + r + 1
     this.fingerY += (target - this.fingerY) * (1 - Math.exp(-dt * (pressing ? 14 : 30)))
     sim.finger.value.set(this.hit.x, this.fingerY, this.hit.z)
     sim.time.value = this.elapsed
 
-    this.ring.visible = onSheet && live
+    this.ring.visible = onSheet && live && !viewing
     this.ring.position.set(this.hit.x, sheet.domeHeight + 0.04, this.hit.z)
     this.ring.scale.set(params.tool === 'roller' ? sim.rollerHalf.value : r, 1, r)
 
     if (live) sim.step(this.renderer, dt, params.substeps)
     else this.synth.hiss(0)
     this.surface.update(this.renderer)
-    // Focus where you look: the pointer's spot on the sheet, else the sheet's middle.
-    const focusAt = params.focusFollows && onSheet ? this.hit : new THREE.Vector3(0, 0, 0)
-    const forward = this.camera.getWorldDirection(new THREE.Vector3())
-    const want = focusAt.clone().sub(this.camera.position).dot(forward)
+    // Focus where you look: the pointer's spot on the sheet, else the middle of the view (which
+    // follows pan and zoom).
+    const want =
+      params.focusFollows && onSheet && !this.controls.dragging
+        ? viewDepth(pose, [this.hit.x, this.hit.y, this.hit.z])
+        : viewDepth(pose, [pose.target[0], sheet.domeHeight * 0.5, pose.target[2]])
     this.focus += (want - this.focus) * (params.reducedMotion ? 1 : 1 - Math.exp(-dt * 8))
     // Debug views show raw data, so they skip depth of field, bloom, grain and the vignette.
     if (this.post && params.view === 'shaded') {
       this.post.focus.value = this.focus
-      // Depth of field in world units: about a third of the sheet's depth stays sharp.
-      this.post.focalLength.value = sheet.depth * 0.35
+      // Depth of field in world units: about a third of the sheet's depth stays sharp at the fit
+      // framing, and the sharp slice thins (a little slower than the zoom) in close-ups.
+      this.post.focalLength.value = sheet.depth * 0.35 * Math.pow(this.controls.zoom, 0.75)
       this.post.render()
     } else {
       this.renderer.render(this.scene, this.camera)
@@ -464,7 +581,7 @@ export class BubbleWrapApp {
           this.synth.play({ pressure: pops[b * 4 + 1], size: diameter, pan: x / (sheet.width / 2) })
         }
         this.synth.hiss(Math.sqrt(venting) * 1.4)
-        if (fresh) this.onStats({ popped, total })
+        if (fresh) this.onStats({ popped, total, viewMoved: this.viewMoved })
       })
       .catch(() => {})
       .finally(() => {
@@ -480,10 +597,13 @@ export class BubbleWrapApp {
     canvas.removeEventListener('pointerdown', this.onDown)
     canvas.removeEventListener('pointermove', this.onMove)
     canvas.removeEventListener('pointerleave', this.onLeave)
+    canvas.removeEventListener('wheel', this.onWheel)
+    canvas.removeEventListener('contextmenu', this.onContextMenu)
     window.removeEventListener('pointerup', this.onUp)
     window.removeEventListener('pointercancel', this.onUp)
     this.synth.dispose()
     window.clearTimeout(this.envTimer)
+    window.clearTimeout(this.resizeTimer)
     this.envTarget?.dispose()
     this.post?.dispose()
     this.renderer.dispose()

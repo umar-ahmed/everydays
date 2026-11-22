@@ -21,19 +21,16 @@ import {
 } from 'three/tsl'
 import type { ComputeNode, Node, WebGPURenderer } from 'three/webgpu'
 import { BACK_OFFSET } from './camera.ts'
-import { MAP_SCALE, MAX_H, MAX_W, type Sheet } from './sheet.ts'
+import { MAP_SCALE, type Sheet } from './sheet.ts'
 import type { BubbleSim } from './sim.ts'
 
 type I = Node<'int'>
 const imin = (a: I, b: I) => select(a.lessThan(b), a, b)
 const iclamp = (a: I, lo: I, hi: I) => select(a.lessThan(lo), lo, imin(a, hi))
 
-/** Render vertices per sim segment, the Render detail dial. */
-export const DETAILS = [1, 2, 4] as const
-export const MAX_DETAIL = 4
-export const renderSize = (W: number, H: number, detail: number) => ({ RW: (W - 1) * detail + 1, RH: (H - 1) * detail + 1 })
-const MAX = renderSize(MAX_W, MAX_H, MAX_DETAIL)
-export const MAX_RENDER_VERTS = MAX.RW * MAX.RH
+import { MAX_RENDER_VERTS, renderSize } from './layout.ts'
+
+export { DETAILS, MAX_DETAIL, MAX_RENDER_VERTS, renderSize } from './layout.ts'
 
 /**
  * A render surface denser than the cloth sim. Its rest shape is sampled from the bubble map's

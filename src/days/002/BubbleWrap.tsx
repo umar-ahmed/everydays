@@ -4,13 +4,18 @@ import { useEffect, useRef, useState } from 'react'
 import { BubbleWrapApp, webgpuAvailable, type Params, type Stats } from './app.ts'
 import { SHAPES, TILINGS, type Shape, type Tiling } from './generators/lattice.ts'
 
+const MODES = ['press', 'view'] as const
+type Mode = (typeof MODES)[number]
+
 const dialConfig = {
+  mode: { type: 'select', options: [...MODES], default: 'press' },
   shape: { type: 'select', options: [...SHAPES], default: 'circle' },
   sheet: {
     tiling: { type: 'select', options: [...TILINGS], default: 'square' },
     'bubble size': [1.1, 0.6, 2.2, 0.05],
     spacing: [0.28, 0.1, 1, 0.01],
-    'grid count': [11, 4, 20, 1],
+    // Bubbles along the shorter side; the longer side fills the screen.
+    'bubbles across': [8, 3, 16, 1],
     'pinhole chance': [0.06, 0, 0.5, 0.01],
   },
   physics: {
@@ -72,6 +77,7 @@ const dialConfig = {
     'debug view': { type: 'select', options: ['shaded', 'normals', 'wireframe', 'map'], default: 'shaded' },
   },
   reset: { type: 'action' },
+  'reset view': { type: 'action' },
 } satisfies DialConfig
 
 type Status = 'loading' | 'running' | 'unsupported'
@@ -83,12 +89,16 @@ export function BubbleWrap() {
     onAction: (path) => actionRef.current(path),
   })
   const v = dial.values
+  // Holding Space is a temporary View mode on desktop.
+  const [held, setHeld] = useState(false)
+  const mode: Mode = held ? 'view' : (v.mode as Mode)
   const params: Params = {
+    mode,
     shape: v.shape as Shape,
     tiling: v.sheet.tiling as Tiling,
     size: v.sheet['bubble size'],
     spacing: v.sheet.spacing,
-    cols: v.sheet['grid count'],
+    across: v.sheet['bubbles across'],
     pinholeChance: v.sheet['pinhole chance'],
     fill: v.physics['fill pressure'],
     threshold: v.physics['burst threshold'],
@@ -138,7 +148,7 @@ export function BubbleWrap() {
   const container = useRef<HTMLDivElement>(null)
   const appRef = useRef<BubbleWrapApp | null>(null)
   const [status, setStatus] = useState<Status>('loading')
-  const [stats, setStats] = useState<Stats>({ popped: 0, total: 0 })
+  const [stats, setStats] = useState<Stats>({ popped: 0, total: 0, viewMoved: false })
 
   useEffect(() => {
     let app: BubbleWrapApp | null = null
@@ -152,7 +162,9 @@ export function BubbleWrap() {
       // Skip no-op updates: a sheet rebuild reports 0/N on every dial tick, and re-rendering for
       // an unchanged count re-runs the params effect inside DialKit's update.
       const onStats = (s: Stats) =>
-        setStats((prev) => (prev.popped === s.popped && prev.total === s.total ? prev : s))
+        setStats((prev) =>
+          prev.popped === s.popped && prev.total === s.total && prev.viewMoved === s.viewMoved ? prev : s,
+        )
       app = new BubbleWrapApp(container.current, paramsRef.current, onStats)
       try {
         await app.init()
@@ -185,13 +197,36 @@ export function BubbleWrap() {
   useEffect(() => {
     actionRef.current = (path) => {
       if (path === 'reset') appRef.current?.reset()
+      if (path === 'reset view') appRef.current?.resetView()
     }
+    const typing = (e: KeyboardEvent) =>
+      e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'r' && !(e.target instanceof HTMLInputElement)) appRef.current?.reset()
+      if (typing(e) || e.metaKey || e.ctrlKey || e.altKey) return
+      if (e.key === 'r') appRef.current?.reset()
+      if (e.key === 'v' && !e.repeat) dial.setValue('mode', v.mode === 'view' ? 'press' : 'view')
+      if (e.code === 'Space') {
+        // Also keeps a focused button from being clicked by the held key.
+        e.preventDefault()
+        setHeld(true)
+      }
     }
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') setHeld(false)
+    }
+    const onBlur = () => setHeld(false)
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', onBlur)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', onBlur)
+    }
   })
+
+  const pill =
+    'pointer-events-auto whitespace-nowrap rounded-full border border-white/15 bg-white/5 px-3 py-2 font-mono text-[11px] text-white/70 backdrop-blur transition-colors hover:border-white/30 hover:text-white focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:outline-none sm:py-1.5'
 
   return (
     <>
@@ -218,7 +253,7 @@ export function BubbleWrap() {
           </div>
         )}
 
-        <div data-chrome className="pointer-events-none absolute bottom-4 left-4 max-w-[65vw] font-mono text-[11px] tracking-wide text-white/55 sm:bottom-5 sm:left-5">
+        <div data-chrome className="pointer-events-none absolute top-4 left-4 max-w-[65vw] font-mono text-[11px] tracking-wide text-white/55 lg:top-auto lg:bottom-5 lg:left-5">
           <a href={import.meta.env.BASE_URL} className="pointer-events-auto text-white/35 transition-colors hover:text-white/80">
             everydays
           </a>
@@ -229,16 +264,40 @@ export function BubbleWrap() {
         {status === 'running' && (
           <div
             data-chrome
-            className="pointer-events-none absolute right-4 bottom-4 flex items-center gap-3 sm:right-auto sm:bottom-5 sm:left-1/2 sm:-translate-x-1/2"
+            className="pointer-events-none absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-2 sm:bottom-5 sm:gap-3"
           >
-            <span className="hidden font-mono text-[11px] text-white/30 sm:inline">
-              press &amp; drag to pop · {stats.popped}/{stats.total}
+            <span className="font-mono text-[11px] whitespace-nowrap text-white/30">
+              <span className="hidden md:inline">
+                {mode === 'view' ? 'drag to pan · scroll to zoom' : 'press & drag to pop'} ·{' '}
+              </span>
+              {stats.popped}/{stats.total}
             </span>
-            <button
-              type="button"
-              onClick={() => appRef.current?.reset()}
-              className="pointer-events-auto rounded-full border border-white/15 bg-white/5 px-3 py-1.5 font-mono text-[11px] text-white/70 backdrop-blur transition-colors hover:border-white/30 hover:text-white focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:outline-none"
+            <div
+              role="radiogroup"
+              aria-label="Mode"
+              className="pointer-events-auto flex rounded-full border border-white/15 bg-white/5 p-0.5 backdrop-blur"
             >
+              {MODES.map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  role="radio"
+                  aria-checked={mode === m}
+                  onClick={() => dial.setValue('mode', m)}
+                  className={`rounded-full px-3 py-1.5 font-mono text-[11px] transition-colors focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:outline-none sm:py-1 ${
+                    mode === m ? 'bg-white/15 text-white' : 'text-white/50 hover:text-white/80'
+                  }`}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+            {stats.viewMoved && (
+              <button type="button" onClick={() => appRef.current?.resetView()} className={pill}>
+                reset view
+              </button>
+            )}
+            <button type="button" onClick={() => appRef.current?.reset()} className={pill}>
               new sheet
             </button>
           </div>
