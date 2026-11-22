@@ -28,6 +28,8 @@ jobs:
         with:
           enablement: true
       - run: npm ci
+      # The day 002 checks run the real WebGPU map generator in headless Chromium (SwiftShader).
+      - run: npx playwright install --only-shell chromium
       - run: npm run check
       - run: npm run build
         env:
