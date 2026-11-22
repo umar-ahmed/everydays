@@ -88,7 +88,7 @@ async function run(): Promise<Result> {
               const texels = layout.mapW * layout.mapH
               if (texels > MAX_MAP) fail(`map ${texels} texels > capacity ${MAX_MAP}`)
               generator.configure(layout, { tiling, shape })
-              renderer.compute(generator.compute)
+              void renderer.compute(generator.compute)
               const raw = new Float32Array(await renderer.getArrayBufferAsync(mapRaw.value, null, 0, texels * 16))
               const sheet = buildSheetFromMap({ layout, raw, pinholeChance: 0.06 })
               const verts = sheet.W * sheet.H
@@ -236,7 +236,7 @@ async function run(): Promise<Result> {
                 for (const pose of candidates) {
                   poses++
                   const { near, far } = clipPlanes(pose, fit.offset, box, view, fit.far)
-                  const tag = `elevation ${elevation} pose ${pose.target.map((v) => v.toFixed(1))}/${pose.dist.toFixed(1)}/${((pose.elevation * 180) / Math.PI).toFixed(0)}/${((pose.azimuth * 180) / Math.PI).toFixed(0)}`
+                  const tag = `elevation ${elevation} pose ${pose.target.map((v) => v.toFixed(1)).join(',')}/${pose.dist.toFixed(1)}/${((pose.elevation * 180) / Math.PI).toFixed(0)}/${((pose.azimuth * 180) / Math.PI).toFixed(0)}`
                   // Everything visible on the sheet (sampled through the frustum) sits between the planes.
                   let zMin = Infinity
                   let zMax = 0
@@ -268,7 +268,7 @@ async function run(): Promise<Result> {
       }
     }
   }
-  renderer.dispose()
+  void renderer.dispose()
   const range = (k: string) => `${Math.min(...counts[k])}-${Math.max(...counts[k])}`
   return {
     configs,

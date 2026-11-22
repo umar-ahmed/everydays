@@ -236,7 +236,7 @@ export class BubbleWrapApp {
     window.addEventListener('pointerup', this.onUp)
     window.addEventListener('pointercancel', this.onUp)
     this.resize.observe(this.container)
-    this.renderer.setAnimationLoop(this.frame)
+    await this.renderer.setAnimationLoop(this.frame)
   }
 
   setParams(params: Params) {
@@ -258,7 +258,7 @@ export class BubbleWrapApp {
     const aspect = sheetAspect(this.viewport)
     const layout = layoutFor({ ...params, aspect, lattice: latticeFor(params.tiling), budget: this.budget })
     this.generator.configure(layout, params)
-    this.renderer.compute(this.generator.compute)
+    void this.renderer.compute(this.generator.compute)
     const buf = await this.renderer.getArrayBufferAsync(this.sim.mapRaw.value, null, 0, layout.mapW * layout.mapH * 16)
     // A newer dial change superseded this build while it was on the GPU.
     if (build !== this.builds || this.disposed) return
@@ -608,7 +608,7 @@ export class BubbleWrapApp {
 
   dispose() {
     this.disposed = true
-    this.renderer.setAnimationLoop(null)
+    void this.renderer.setAnimationLoop(null)
     this.resize.disconnect()
     const canvas = this.renderer.domElement
     canvas.removeEventListener('pointerdown', this.onDown)
@@ -623,7 +623,7 @@ export class BubbleWrapApp {
     window.clearTimeout(this.resizeTimer)
     this.envTarget?.dispose()
     this.post?.dispose()
-    this.renderer.dispose()
+    void this.renderer.dispose()
     canvas.remove()
   }
 }

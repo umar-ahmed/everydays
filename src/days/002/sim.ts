@@ -390,6 +390,6 @@ export class BubbleSim {
     }
     list.push(this.normals)
     for (let k = 0; k < this.backIterations; k += 2) list.push(...this.backFill)
-    renderer.compute(list)
+    void renderer.compute(list)
   }
 }

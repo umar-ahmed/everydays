@@ -212,10 +212,10 @@ export class RenderSurface {
 
   update(renderer: WebGPURenderer) {
     if (this.dirty) {
-      renderer.compute(this.staticPass)
+      void renderer.compute(this.staticPass)
       this.dirty = false
     }
-    renderer.compute([this.surfacePass, this.normalPass, this.backPass, this.backNormalPass])
+    void renderer.compute([this.surfacePass, this.normalPass, this.backPass, this.backNormalPass])
   }
 }
 
