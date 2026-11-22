@@ -3,11 +3,13 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import { PopSynth } from './audio.ts'
 import { FOV, TABLE_GAP, fitCamera } from './camera.ts'
 import { FilmLook } from './materials.ts'
-import { buildSheet, MAX_VERTS, type Sheet, type SheetConfig } from './sheet.ts'
-import type { Shape } from './shapes.ts'
+import { LatticeGenerator, type Shape, type Tiling } from './generators/lattice.ts'
+import { buildSheetFromMap, layoutFor, MAX_VERTS, type Sheet } from './sheet.ts'
 import { BubbleSim } from './sim.ts'
 
-export type Params = SheetConfig & {
+export type SheetParams = { shape: Shape; tiling: Tiling; size: number; spacing: number; cols: number; pinholeChance: number }
+
+export type Params = SheetParams & {
   fill: number
   threshold: number
   stiffness: number
@@ -27,7 +29,7 @@ export type Params = SheetConfig & {
   pitch: number
   reducedMotion: boolean
   simulation: 'running' | 'paused' | 'rest pose'
-  view: 'shaded' | 'normals' | 'wireframe'
+  view: 'shaded' | 'normals' | 'wireframe' | 'map'
 }
 
 export type Stats = { popped: number; total: number }
@@ -41,8 +43,9 @@ export async function webgpuAvailable() {
   }
 }
 
-const sameSheet = (a: SheetConfig, b: SheetConfig) =>
+const sameSheet = (a: SheetParams, b: SheetParams) =>
   a.shape === b.shape &&
+  a.tiling === b.tiling &&
   a.size === b.size &&
   a.spacing === b.spacing &&
   a.cols === b.cols &&
@@ -55,8 +58,10 @@ export class BubbleWrapApp {
   private camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 500)
   private sim = new BubbleSim()
   private geometry = new THREE.BufferGeometry()
-  private sheet: Sheet
+  private sheet!: Sheet
   private params: Params
+  private generator = new LatticeGenerator(this.sim.mapRaw)
+  private builds = 0
   private key = new THREE.DirectionalLight(0xffffff, 1)
   private rim = new THREE.DirectionalLight(0xdfe9ff, 1)
   private fill = new THREE.DirectionalLight(0xfff3e6, 0.35)
@@ -87,7 +92,6 @@ export class BubbleWrapApp {
     this.container = container
     this.onStats = onStats
     this.params = params
-    this.sheet = buildSheet(params)
     this.renderer = new THREE.WebGPURenderer({ antialias: true })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.toneMapping = THREE.NeutralToneMapping
@@ -134,8 +138,8 @@ export class BubbleWrapApp {
     scene.add(mesh, this.ring)
     this.mesh = mesh
 
-    this.loadSheet(this.sheet)
-    this.apply(this.params)
+    await this.rebuild(this.params)
+    if (this.disposed) return
 
     const canvas = this.renderer.domElement
     canvas.addEventListener('pointerdown', this.onDown)
@@ -151,12 +155,24 @@ export class BubbleWrapApp {
   setParams(params: Params) {
     const rebuild = !sameSheet(params, this.params)
     this.params = params
-    if (rebuild) {
-      this.sheet = buildSheet(params)
-      this.loadSheet(this.sheet)
-      this.fit()
-    }
-    this.apply(params)
+    // The old sheet keeps running until the new map has been generated and read back.
+    if (rebuild && this.sheet) void this.rebuild(params)
+    if (this.sheet) this.apply(params)
+  }
+
+  /** Generate the bubble map on the GPU, read it back once, and build the sheet from it. */
+  private async rebuild(params: Params) {
+    const build = ++this.builds
+    const layout = layoutFor(params)
+    this.generator.configure(layout, params)
+    this.renderer.compute(this.generator.compute)
+    const buf = await this.renderer.getArrayBufferAsync(this.sim.mapRaw.value, null, 0, layout.mapW * layout.mapH * 16)
+    // A newer dial change superseded this build while it was on the GPU.
+    if (build !== this.builds || this.disposed) return
+    const sheet = buildSheetFromMap({ layout, raw: new Float32Array(buf), pinholeChance: params.pinholeChance })
+    this.sheet = sheet
+    this.loadSheet(sheet)
+    this.apply(this.params)
   }
 
   reset() {
@@ -167,21 +183,17 @@ export class BubbleWrapApp {
     this.generation++
     this.sim.load(sheet, this.params.fill)
     const { look } = this
-    look.cell.value = sheet.width / sheet.cols
-    look.cols.value = sheet.cols
-    look.rows.value = sheet.rows
-    look.half.value.set(sheet.width / 2, sheet.depth / 2)
-    look.domeR.value = sheet.size / 2
     look.lens.value = sheet.domeHeight
+    look.contour.value = sheet.size * 0.06
     // Domes focus the key light onto the table on the side away from it.
     const away = new THREE.Vector2(-this.key.position.x, -this.key.position.z).normalize()
     look.spot.value.copy(away).multiplyScalar(sheet.domeHeight * 0.55)
     this.geometry.setIndex(new THREE.BufferAttribute(sheet.index, 1))
     this.geometry.setDrawRange(0, sheet.index.length)
-    this.seen = new Uint8Array(sheet.cols * sheet.rows)
+    this.seen = new Uint8Array(sheet.count)
     // Rebuilds run inside React's synchronous flush of a dial change; reporting from there nests
     // a state update per slider step and trips React's update-depth limit under rapid input.
-    const total = sheet.cols * sheet.rows
+    const total = sheet.count
     queueMicrotask(() => this.onStats({ popped: 0, total }))
   }
 
@@ -203,7 +215,8 @@ export class BubbleWrapApp {
     this.synth.pitch = p.pitch
     look.restPose.value = p.simulation === 'rest pose' ? 1 : 0
     if (this.mesh) {
-      this.mesh.material = p.view === 'normals' ? look.normals : p.view === 'wireframe' ? look.wireframe : look.film
+      const views = { shaded: look.film, normals: look.normals, wireframe: look.wireframe, map: look.mapView }
+      this.mesh.material = views[p.view]
     }
   }
 
@@ -298,8 +311,7 @@ export class BubbleWrapApp {
         if (this.disposed || gen !== this.generation) return
         const pops = new Float32Array(popBuf)
         const state = new Float32Array(stateBuf)
-        const total = sheet.cols * sheet.rows
-        const cellSize = sheet.width / sheet.cols
+        const total = sheet.count
         let popped = 0
         let fresh = 0
         let venting = 0
@@ -312,8 +324,8 @@ export class BubbleWrapApp {
           if (this.seen[b]) continue
           this.seen[b] = 1
           fresh++
-          const x = ((b % sheet.cols) + 0.5) * cellSize - sheet.width / 2
-          this.synth.play({ pressure: pops[b * 4 + 1], size: sheet.size, pan: x / (sheet.width / 2) })
+          const [x, , , diameter] = sheet.centers.subarray(b * 4, b * 4 + 4)
+          this.synth.play({ pressure: pops[b * 4 + 1], size: diameter, pan: x / (sheet.width / 2) })
         }
         this.synth.hiss(Math.sqrt(venting) * 1.4)
         if (fresh) this.onStats({ popped, total })
@@ -340,4 +352,4 @@ export class BubbleWrapApp {
   }
 }
 
-export type { Shape }
+export type { Shape, Tiling }

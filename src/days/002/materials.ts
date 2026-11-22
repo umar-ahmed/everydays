@@ -44,20 +44,18 @@ export class FilmLook {
   /** Refraction depth of a full dome, cm: each dome reads as a small lens. */
   readonly lens = uniform(0.4)
 
-  // Sheet layout for the table's caustic lookup.
-  readonly cell = uniform(1.4)
-  readonly cols = uniform(1, 'int')
-  readonly rows = uniform(1, 'int')
-  readonly half = uniform(new THREE.Vector2(1, 1))
+  /** Offset of each dome's focused spot on the table, away from the key light (cm). */
   readonly spot = uniform(new THREE.Vector2(0.2, 0.15))
-  readonly domeR = uniform(0.5)
   readonly caustics = uniform(1)
+  /** Contour spacing for the map view (cm). */
+  readonly contour = uniform(0.1)
 
   readonly film: THREE.MeshPhysicalNodeMaterial
   readonly table: THREE.MeshStandardNodeMaterial
   /** Debug views: world normals as colour, and the triangle wireframe. */
   readonly normals: THREE.MeshBasicNodeMaterial
   readonly wireframe: THREE.MeshBasicNodeMaterial
+  readonly mapView: THREE.MeshBasicNodeMaterial
 
   /** 1 renders the sheet builder's rest geometry with no sim output (Debug > Simulation). */
   readonly restPose = uniform(0)
@@ -71,6 +69,7 @@ export class FilmLook {
     this.normals.colorNode = normalize(varying(this.normal(sim).xyz)).mul(0.5).add(0.5)
     this.wireframe = new THREE.MeshBasicNodeMaterial({ color: 0xd8dce2, wireframe: true })
     this.wireframe.positionNode = position
+    this.mapView = this.makeMapView(sim)
   }
 
   private live() {
@@ -160,22 +159,44 @@ export class FilmLook {
     const p = positionWorld.xz
     // Linear values: a lit centre around 18% gray falling to a near-black backdrop.
     const sweep = mix(vec3(0.016, 0.0165, 0.018), vec3(0.004, 0.0042, 0.0048), smoothstep(3, 22, length(p)))
-    const local = p.add(this.half).div(this.cell)
-    const id = floor(local)
-    const inside = id.x
-      .greaterThanEqual(0)
-      .and(id.y.greaterThanEqual(0))
-      .and(id.x.lessThan(float(this.cols)))
-      .and(id.y.lessThan(float(this.rows)))
-    const b = select(inside, int(id.y).mul(this.cols).add(int(id.x)), int(0))
+    const { onSheet, id } = mapAt(sim, p)
+    const bubble = onSheet.and(id.greaterThanEqual(0))
+    const b = select(bubble, id, int(0))
+    const center = sim.centers.element(b)
     const intact = select(this.live(), oneMinus(sim.pops.element(b).x), float(1))
-    const f = fract(local).sub(0.5).mul(this.cell).sub(this.spot)
-    const focus: Node<'float'> = exp(dot(f, f).div(this.domeR.mul(this.domeR).mul(0.06)).negate())
-    const glow = select(inside, focus.mul(intact).mul(this.caustics).mul(0.035), float(0))
+    const f = p.sub(center.xy).sub(this.spot)
+    const focus: Node<'float'> = exp(dot(f, f).div(center.z.mul(center.z).mul(0.06)).negate())
+    const glow = select(bubble, focus.mul(intact).mul(this.caustics).mul(0.035), float(0))
     // The film absorbs a little, so the sheet's footprint sits slightly darker.
-    const shade = select(inside, float(0.9), float(1))
+    const shade = select(onSheet, float(0.9), float(1))
     table.colorNode = sweep.mul(shade).add(vec3(1, 0.98, 0.95).mul(glow))
     table.envMapIntensity = 0.3
     return table
   }
+
+  /** Debug view of the map: a colour per bubble id, distance contours, white rims, red overlaps. */
+  private makeMapView(sim: BubbleSim) {
+    const view = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide })
+    view.positionNode = this.position(sim)
+    const { texel, id } = mapAt(sim, varying(sim.rest.element(vertexIndex).xz))
+    const sd = texel.y
+    const k = float(id)
+    const hue = vec3(fract(sin(k.mul(12.9898)).mul(43758.5)), fract(sin(k.mul(78.233)).mul(12543.1)), fract(sin(k.mul(39.425)).mul(24634.6)))
+    const tint = mix(vec3(0.25), hue.mul(0.75).add(0.2), select(sd.lessThan(0), float(1), float(0.35)))
+    const band = smoothstep(0, 0.12, fract(sd.div(this.contour)))
+    const rim = oneMinus(smoothstep(0, 1.5, abs(sd).div(sim.texel)))
+    const base = select(id.lessThan(0), vec3(0.16), tint.mul(mix(float(0.7), float(1), band)))
+    view.colorNode = select(texel.w.greaterThan(1.5), vec3(1, 0.1, 0.1), mix(base, vec3(1), rim))
+    return view
+  }
+}
+
+/** Nearest map texel for a sheet-space xz position. */
+function mapAt(sim: BubbleSim, xz: Node<'vec2'>) {
+  const t = xz.add(sim.half).div(sim.texel)
+  const tx = int(floor(t.x.add(0.5)))
+  const ty = int(floor(t.y.add(0.5)))
+  const onSheet = tx.greaterThanEqual(0).and(ty.greaterThanEqual(0)).and(tx.lessThan(sim.mapW)).and(ty.lessThan(sim.mapH))
+  const texel = sim.map.element(select(onSheet, ty.mul(sim.mapW).add(tx), int(0)))
+  return { texel, onSheet, id: int(select(onSheet, texel.x, float(-1))) }
 }

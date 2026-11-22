@@ -2,11 +2,12 @@ import { DialRoot, useDialKitController, type DialConfig } from 'dialkit'
 import { useReducedMotion } from 'motion/react'
 import { useEffect, useRef, useState } from 'react'
 import { BubbleWrapApp, webgpuAvailable, type Params, type Stats } from './app.ts'
-import { SHAPES, type Shape } from './shapes.ts'
+import { SHAPES, TILINGS, type Shape, type Tiling } from './generators/lattice.ts'
 
 const dialConfig = {
   shape: { type: 'select', options: [...SHAPES], default: 'circle' },
   sheet: {
+    tiling: { type: 'select', options: [...TILINGS], default: 'square' },
     'bubble size': [1.1, 0.6, 2.2, 0.05],
     spacing: [0.28, 0.1, 1, 0.01],
     'grid count': [11, 4, 20, 1],
@@ -40,7 +41,7 @@ const dialConfig = {
   debug: {
     _collapsed: true,
     simulation: { type: 'select', options: ['running', 'paused', 'rest pose'], default: 'running' },
-    'debug view': { type: 'select', options: ['shaded', 'normals', 'wireframe'], default: 'shaded' },
+    'debug view': { type: 'select', options: ['shaded', 'normals', 'wireframe', 'map'], default: 'shaded' },
   },
   reset: { type: 'action' },
 } satisfies DialConfig
@@ -56,6 +57,7 @@ export function BubbleWrap() {
   const v = dial.values
   const params: Params = {
     shape: v.shape as Shape,
+    tiling: v.sheet.tiling as Tiling,
     size: v.sheet['bubble size'],
     spacing: v.sheet.spacing,
     cols: v.sheet['grid count'],

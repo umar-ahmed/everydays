@@ -16,11 +16,12 @@ import {
   pow,
   select,
   uniform,
+  vec2,
   vec3,
   vec4,
 } from 'three/tsl'
 import type { ComputeNode, WebGPURenderer } from 'three/webgpu'
-import { CELL, MAX_BUBBLES, MAX_VERTS, type Sheet } from './sheet.ts'
+import { MAX_BUBBLES, MAX_MAP, MAX_QUADS, MAX_VERTS, type Sheet } from './sheet.ts'
 
 /**
  * Bubble wrap as an XPBD cloth on the GPU.
@@ -71,12 +72,23 @@ export class BubbleSim {
   readonly meta = instancedArray(MAX_VERTS, 'vec4')
   /** Pop events, one texel per bubble: popped, gauge pressure at burst, burst time, rest volume. */
   readonly pops = instancedArray(MAX_BUBBLES, 'vec4')
+  /** Generator output and the canonical bubble map (see generators/index.ts for the format). */
+  readonly mapRaw = instancedArray(MAX_MAP, 'vec4')
+  readonly map = instancedArray(MAX_MAP, 'vec4')
+  /** Per bubble: center x, center z, inradius, equivalent diameter. */
+  readonly centers = instancedArray(MAX_BUBBLES, 'vec4')
+  readonly mapW = uniform(1, 'int')
+  readonly mapH = uniform(1, 'int')
+  readonly texel = uniform(0.05)
+  readonly half = uniform(vec2(1, 1))
+  /** Per bubble: (first, count) into quadList, the quads its volume is summed over. */
+  readonly quadRange = instancedArray(MAX_BUBBLES, 'vec2')
+  readonly quadList = instancedArray(MAX_QUADS, 'float')
   /** Live state per bubble: gauge pressure, volume, gas content (atm), pinhole flag. */
   readonly state = instancedArray(MAX_BUBBLES, 'vec4')
 
   readonly uW = uniform(0, 'int')
   readonly uH = uniform(0, 'int')
-  readonly uCols = uniform(0, 'int')
   readonly uH2 = uniform(1)
   readonly dt = uniform(1 / 600)
   readonly time = uniform(0)
@@ -107,16 +119,18 @@ export class BubbleSim {
   iterations = 7
 
   constructor() {
-    const { x, v, p, q, rest, meta, pops, state, uW, uH, uCols } = this
+    const { x, v, p, q, rest, meta, pops, state, uW, uH, quadRange, quadList } = this
 
     const bubbles = Fn(() => {
       const b = int(instanceIndex)
-      const cx = b.mod(uCols)
-      const cy = b.div(uCols)
+      const range = quadRange.element(b)
+      const first = int(range.x)
       const volume = float(0).toVar()
-      Loop(CELL * CELL, ({ i }) => {
-        const ix = cx.mul(CELL).add(i.mod(CELL))
-        const iy = cy.mul(CELL).add(i.div(CELL))
+      // Each bubble sums its own quads (any footprint shape or layout), as listed by the sheet.
+      Loop({ start: int(0), end: int(range.y), type: 'int', condition: '<' }, ({ i }) => {
+        const quad = int(quadList.element(first.add(i)))
+        const ix = quad.mod(uW.sub(1))
+        const iy = quad.div(uW.sub(1))
         const i0 = iy.mul(uW).add(ix)
         const p0 = x.element(i0).xyz
         const p1 = x.element(i0.add(1)).xyz
@@ -269,17 +283,24 @@ export class BubbleSim {
     write(this.restNormal, sheet.restNormal)
     write(this.meta, sheet.meta)
     write(this.pops, sheet.bubbles)
-    const state = new Float32Array(sheet.cols * sheet.rows * 4)
-    for (let b = 0; b < sheet.cols * sheet.rows; b++) {
+    write(this.map, sheet.map)
+    write(this.centers, sheet.centers)
+    this.mapW.value = sheet.mapW
+    this.mapH.value = sheet.mapH
+    this.texel.value = sheet.texel
+    this.half.value.set(sheet.width / 2, sheet.depth / 2)
+    write(this.quadRange, sheet.quadRange)
+    write(this.quadList, sheet.quadList)
+    const state = new Float32Array(sheet.count * 4)
+    for (let b = 0; b < sheet.count; b++) {
       state[b * 4 + 2] = 1 + fill
       state[b * 4 + 3] = sheet.pinholes[b]
     }
     write(this.state, state)
     this.uW.value = sheet.W
     this.uH.value = sheet.H
-    this.uCols.value = sheet.cols
     // Dispatch only the live sheet; three bounds-checks each kernel against its count.
-    this.kernels[0].count = sheet.cols * sheet.rows
+    this.kernels[0].count = Math.max(sheet.count, 1)
     for (const k of [...this.kernels.slice(1), this.solveQP, this.normals]) k.count = n
     this.uH2.value = sheet.h * sheet.h
   }

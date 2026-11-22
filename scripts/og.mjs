@@ -95,15 +95,21 @@ async function day002() {
   await page.mouse.click(size.width - 37, 37)
   await page.addStyleTag({ content: '.dialkit-root,[data-chrome]{display:none!important}' })
   const popped = () => page.evaluate(() => window.bubblewrap.seen.reduce((a, b) => a + b, 0))
-  // Pop a loose diagonal so the card shows intact and collapsed domes side by side.
-  for (const [c, r] of [[3, 2], [4, 3], [7, 4], [8, 2], [2, 5], [6, 6]]) {
-    const at = await page.evaluate(([c, r, w, h]) => {
+  // Pop a loose scatter so the card shows intact and collapsed domes side by side.
+  for (const [fx, fz] of [[0.32, 0.3], [0.42, 0.45], [0.66, 0.56], [0.74, 0.3], [0.22, 0.68], [0.56, 0.8]]) {
+    const at = await page.evaluate(([fx, fz, w, h]) => {
       const a = window.bubblewrap
       const s = a.sheet
-      const cell = s.width / s.cols
-      const p = a.hit.clone().set((c + 0.5) * cell - s.width / 2, s.domeHeight, (r + 0.5) * cell - s.depth / 2).project(a.camera)
+      // Nearest bubble (from the map-derived centers) to a fraction of the sheet.
+      const x = (fx - 0.5) * s.width
+      const z = (fz - 0.5) * s.depth
+      let best = 0
+      for (let b = 1; b < s.count; b++) {
+        if (Math.hypot(s.centers[b * 4] - x, s.centers[b * 4 + 1] - z) < Math.hypot(s.centers[best * 4] - x, s.centers[best * 4 + 1] - z)) best = b
+      }
+      const p = a.hit.clone().set(s.centers[best * 4], s.domeHeight, s.centers[best * 4 + 1]).project(a.camera)
       return [((p.x + 1) / 2) * w, ((1 - p.y) / 2) * h]
-    }, [c, r, size.width, size.height])
+    }, [fx, fz, size.width, size.height])
     const before = await popped()
     await page.mouse.move(at[0], at[1])
     await page.mouse.down()

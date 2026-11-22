@@ -1,28 +1,13 @@
-import { sdf, type Shape } from './shapes.ts'
+import type { Layout } from './layout.ts'
 
-/** Grid segments per bubble cell. The GPU kernels loop over exactly this many quads per cell. */
-export const CELL = 12
-export const MAX_COLS = 20
-export const MAX_ROWS = 14
-export const MAX_W = MAX_COLS * CELL + 1
-export const MAX_H = MAX_ROWS * CELL + 1
-export const MAX_VERTS = MAX_W * MAX_H
-export const MAX_BUBBLES = MAX_COLS * MAX_ROWS
+export * from './layout.ts'
 
-export type SheetConfig = { shape: Shape; size: number; spacing: number; cols: number; pinholeChance: number }
-
-export type Sheet = {
-  cols: number
-  rows: number
-  W: number
-  H: number
-  /** Rest spacing between neighbouring particles (cm). */
-  h: number
-  /** Bubble footprint diameter and dome height (cm). */
-  size: number
+/** Everything the sim and renderer need, derived from a bubble map alone. */
+export type Sheet = Layout & {
+  /** Number of bubbles; ids are dense, 0..count-1. */
+  count: number
+  /** Tallest dome (cm), for picking and the lifted finger. */
   domeHeight: number
-  width: number
-  depth: number
   /** vec4 per vertex: rest xyz, domeness 0..1 (thin-film and bending use it). */
   rest: Float32Array
   /** vec4 per vertex: rest normal xyz, w = 0 (no compression). */
@@ -31,79 +16,141 @@ export type Sheet = {
   meta: Float32Array
   /** vec4 per bubble: popped, burst gauge, burst time, rest volume. */
   bubbles: Float32Array
+  /** vec4 per bubble: center x, center z, inside depth (inradius), equivalent diameter (cm). */
+  centers: Float32Array
   /** 1 for bubbles born with a pinhole. Rolled again for every new sheet. */
   pinholes: Float32Array
+  /** vec2 per bubble: (first, count) into quadList. The volume kernel sums exactly these quads. */
+  quadRange: Float32Array
+  /** Quad indices (iy * (W - 1) + ix), grouped by bubble. */
+  quadList: Float32Array
+  /** The canonical map: vec4 per texel with dense id (or -1), signed distance, seed, coverage. */
+  map: Float32Array
   index: Uint32Array
 }
 
-export const rowsFor = (cols: number) => Math.max(2, Math.round(cols * 0.7))
+export type SheetBuild = { layout: Layout; raw: Float32Array; pinholeChance: number }
 
-export function buildSheet({ shape, size, spacing, cols, pinholeChance }: SheetConfig): Sheet {
-  cols = Math.min(Math.max(Math.round(cols), 2), MAX_COLS)
-  const rows = Math.min(rowsFor(cols), MAX_ROWS)
-  const W = cols * CELL + 1
-  const H = rows * CELL + 1
-  const cellSize = size * (1 + spacing)
-  const h = cellSize / CELL
-  const f = sdf[shape]
+/**
+ * Builds the cloth from a generator's raw map (see generators/index.ts). Runs once per rebuild
+ * on the readback; nothing here assumes a lattice.
+ */
+export function buildSheetFromMap({ layout, raw, pinholeChance }: SheetBuild): Sheet {
+  const { W, H, h, mapW, mapH, texel, width, depth } = layout
+  const texels = mapW * mapH
 
-  // Deepest inside distance over the footprint, so every shape's dome peaks at t = 1.
-  let deepest = 0
-  for (let j = 0; j <= CELL; j++) {
-    for (let i = 0; i <= CELL; i++) {
-      const u = ((i - CELL / 2) * h) / (size / 2)
-      const v = ((j - CELL / 2) * h) / (size / 2)
-      deepest = Math.max(deepest, -f(u, -v))
+  // Dense ids in order of first appearance; only bubbles that actually cover a texel count.
+  const dense = new Map<number, number>()
+  for (let t = 0; t < texels; t++) {
+    const id = raw[t * 4]
+    if (id >= 0 && raw[t * 4 + 1] < 0 && !dense.has(id)) dense.set(id, dense.size)
+  }
+  const count = dense.size
+  const map = new Float32Array(texels * 4)
+  const area = new Float64Array(count)
+  const cx = new Float64Array(count)
+  const cz = new Float64Array(count)
+  const deepest = new Float64Array(count)
+  for (let t = 0; t < texels; t++) {
+    const id = raw[t * 4]
+    const sd = raw[t * 4 + 1]
+    const b = id >= 0 ? (dense.get(id) ?? -1) : -1
+    map[t * 4] = b
+    map[t * 4 + 1] = b >= 0 ? sd : Math.max(sd, 0)
+    map[t * 4 + 2] = raw[t * 4 + 2]
+    map[t * 4 + 3] = raw[t * 4 + 3]
+    if (b >= 0 && sd < 0) {
+      area[b]++
+      cx[b] += (t % mapW) * texel - width / 2
+      cz[b] += Math.floor(t / mapW) * texel - depth / 2
+      deepest[b] = Math.max(deepest[b], -sd)
     }
   }
-  // Real bubbles stand about 0.4x their diameter; narrow shapes come out a little lower.
-  const domeHeight = size * 0.38 * Math.min(1, 0.55 + 0.45 * deepest)
 
+  const centers = new Float32Array(count * 4)
+  const domeH = new Float64Array(count)
+  let domeHeight = 0
+  for (let b = 0; b < count; b++) {
+    const rEq = Math.sqrt((area[b] * texel * texel) / Math.PI)
+    centers[b * 4] = cx[b] / area[b]
+    centers[b * 4 + 1] = cz[b] / area[b]
+    centers[b * 4 + 2] = deepest[b]
+    centers[b * 4 + 3] = 2 * rEq
+    // Real bubbles stand about 0.4x their diameter; narrow footprints come out a little lower.
+    domeH[b] = 0.76 * rEq * Math.min(1, 0.55 + (0.45 * deepest[b]) / Math.max(rEq, 1e-6))
+    domeHeight = Math.max(domeHeight, domeH[b])
+  }
+
+  // Dome height from the distance to the edge: a spherical cap with steep walls at the rim.
+  // Easing the rim in (a soft foot) makes the base a shallow skirt that flattens sideways
+  // instead of compressing the gas, and non-circular bubbles stop popping; rim smoothing is a
+  // render-side job.
   const rest = new Float32Array(W * H * 4)
   const meta = new Float32Array(W * H * 4)
   for (let iy = 0; iy < H; iy++) {
     for (let ix = 0; ix < W; ix++) {
       const k = (iy * W + ix) * 4
-      const cx = Math.min(Math.floor(ix / CELL), cols - 1)
-      const cy = Math.min(Math.floor(iy / CELL), rows - 1)
-      const u = ((ix - cx * CELL - CELL / 2) * h) / (size / 2)
-      const v = ((iy - cy * CELL - CELL / 2) * h) / (size / 2)
-      const s = f(u, -v)
-      const t = Math.min(Math.max(-s / Math.max(deepest, 1e-3), 0), 1)
-      // Spherical-cap-like profile with steep walls at the rim, like a thermoformed bubble.
-      const y = s < 0 ? domeHeight * Math.sqrt(1 - (1 - t) * (1 - t)) : 0
-      rest[k] = (ix - (W - 1) / 2) * h
+      const t = (iy * 2 * mapW + ix * 2) * 4
+      const b = map[t]
+      const sd = map[t + 1]
+      const inside = b >= 0 && sd < 0
+      let y = 0
+      let dome = 0
+      if (inside) {
+        const d = -sd
+        const u = Math.min(d / Math.max(deepest[b], 1e-6), 1)
+        y = domeH[b] * Math.sqrt(1 - (1 - u) * (1 - u))
+        dome = u
+      }
+      rest[k] = ix * h - width / 2
       rest[k + 1] = y
-      rest[k + 2] = (iy - (H - 1) / 2) * h
-      rest[k + 3] = t
-      meta[k] = cy * cols + cx
-      meta[k + 1] = s < 0 ? 1 : 0
+      rest[k + 2] = iy * h - depth / 2
+      rest[k + 3] = dome
+      meta[k] = inside ? b : 0
+      meta[k + 1] = inside ? 1 : 0
     }
   }
 
-  const bubbles = new Float32Array(cols * rows * 4)
-  for (let b = 0; b < cols * rows; b++) {
-    const cx = b % cols
-    const cy = Math.floor(b / cols)
+  // Each quad belongs to the bubble of its first inside corner; flat quads belong to none.
+  const owner = new Int32Array((W - 1) * (H - 1)).fill(-1)
+  const perBubble = new Int32Array(count)
+  for (let iy = 0; iy < H - 1; iy++) {
+    for (let ix = 0; ix < W - 1; ix++) {
+      const corners = [iy * W + ix, iy * W + ix + 1, (iy + 1) * W + ix + 1, (iy + 1) * W + ix]
+      const c = corners.find((v) => meta[v * 4 + 1] > 0)
+      if (c === undefined) continue
+      const b = meta[c * 4]
+      owner[iy * (W - 1) + ix] = b
+      perBubble[b]++
+    }
+  }
+  const quadRange = new Float32Array(count * 2)
+  let offset = 0
+  for (let b = 0; b < count; b++) {
+    quadRange[b * 2] = offset
+    offset += perBubble[b]
+  }
+  const quadList = new Float32Array(offset)
+  const fill = new Int32Array(count)
+  for (let q = 0; q < owner.length; q++) {
+    const b = owner[q]
+    if (b < 0) continue
+    quadList[quadRange[b * 2] + fill[b]++] = q
+  }
+  for (let b = 0; b < count; b++) quadRange[b * 2 + 1] = fill[b]
+
+  // Rest volume over each bubble's quads: the same sum the GPU kernel does every substep.
+  const bubbles = new Float32Array(count * 4)
+  for (let b = 0; b < count; b++) {
     let volume = 0
-    for (let q = 0; q < CELL * CELL; q++) {
-      const ix = cx * CELL + (q % CELL)
-      const iy = cy * CELL + Math.floor(q / CELL)
-      const i0 = (iy * W + ix) * 4
-      const i1 = i0 + 4
-      const i2 = i0 + (W + 1) * 4
-      const i3 = i0 + W * 4
-      const ax = rest[i2] - rest[i0]
-      const az = rest[i2 + 2] - rest[i0 + 2]
-      const bx = rest[i3] - rest[i1]
-      const bz = rest[i3 + 2] - rest[i1 + 2]
-      const area = 0.5 * (ax * bz - az * bx)
-      volume += (area * (rest[i0 + 1] + rest[i1 + 1] + rest[i2 + 1] + rest[i3 + 1])) / 4
+    for (let n = 0; n < quadRange[b * 2 + 1]; n++) {
+      const q = quadList[quadRange[b * 2] + n]
+      volume += quadVolume(rest, W, q % (W - 1), Math.floor(q / (W - 1)))
     }
     bubbles[b * 4 + 3] = volume
   }
 
-  const pinholes = new Float32Array(cols * rows).map(() => (Math.random() < pinholeChance ? 1 : 0))
+  const pinholes = new Float32Array(count).map(() => (Math.random() < pinholeChance ? 1 : 0))
 
   const index = new Uint32Array((W - 1) * (H - 1) * 6)
   let n = 0
@@ -121,22 +168,34 @@ export function buildSheet({ shape, size, spacing, cols, pinholeChance }: SheetC
   }
 
   return {
-    cols,
-    rows,
-    W,
-    H,
-    h,
-    size,
+    ...layout,
+    count,
     domeHeight,
-    width: cols * cellSize,
-    depth: rows * cellSize,
     rest,
     restNormal: restNormals(rest, W, H),
     meta,
     bubbles,
+    centers,
     pinholes,
+    quadRange,
+    quadList,
+    map,
     index,
   }
+}
+
+/** Projected quad area times its mean height; matches the GPU bubble kernel. */
+export function quadVolume(rest: Float32Array, W: number, ix: number, iy: number) {
+  const i0 = (iy * W + ix) * 4
+  const i1 = i0 + 4
+  const i2 = i0 + (W + 1) * 4
+  const i3 = i0 + W * 4
+  const ax = rest[i2] - rest[i0]
+  const az = rest[i2 + 2] - rest[i0 + 2]
+  const bx = rest[i3] - rest[i1]
+  const bz = rest[i3 + 2] - rest[i1 + 2]
+  const area = 0.5 * (ax * bz - az * bx)
+  return (area * (rest[i0 + 1] + rest[i1 + 1] + rest[i2 + 1] + rest[i3 + 1])) / 4
 }
 
 /** CPU twin of the normals kernel, run on the rest positions. */
