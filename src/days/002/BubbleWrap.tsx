@@ -34,7 +34,7 @@ const dialConfig = {
     'render detail': { type: 'select', options: ['1x', '2x', '4x'], default: '2x' },
     texture: { type: 'select', options: ['none', 'grid', 'dots'], default: 'none' },
     'texture scale': [1, 0.4, 3, 0.05],
-    'texture depth': [0.6, 0, 2, 0.01],
+    'texture depth': [0.8, 0, 2, 0.01],
     'texture sharpness': [0.5, 0, 1, 0.01],
     tint: { type: 'select', options: ['clear', 'pink', 'blue', 'custom'], default: 'clear' },
     'tint color': { type: 'color', default: '#ff9ccc' },

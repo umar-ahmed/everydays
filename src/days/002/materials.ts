@@ -52,7 +52,7 @@ export class FilmLook {
   /** Embossed film texture: 0 none, 1 grid, 2 dots. Period is size / (10 * scale). */
   readonly texture = uniform(0, 'int')
   readonly textureScale = uniform(1)
-  readonly textureDepth = uniform(0.5)
+  readonly textureDepth = uniform(0.8)
   readonly textureSharpness = uniform(0.5)
   readonly bubbleSize = uniform(1.1)
   /** Beer-Lambert tint: transmittance colour for one film pass, raised to the Density power. */
@@ -178,14 +178,14 @@ export class FilmLook {
     }
     const rx = ridge(local.x)
     const ry = ridge(local.y)
-    const gridGrad = vec2(rx.slope, ry.slope).mul(texMask.mul(0.01).div(sqrt(k)))
+    const gridGrad = vec2(rx.slope, ry.slope).mul(texMask.mul(0.03).div(sqrt(k)))
     const gridHeight = rx.h.add(ry.h).mul(texMask)
     // Dimples on offset rows: h = -exp(-k r^2), r measured in cells.
     const row = floor(local.y.mul(freq))
     const shift = row.sub(floor(row.mul(0.5)).mul(2)).mul(0.5)
     const d = vec2(fract(local.x.mul(freq).add(shift)), fract(local.y.mul(freq))).sub(0.5).div(0.32)
     const e = exp(dot(d, d).mul(k.mul(-0.5)))
-    const dotsGrad = d.mul(e).mul(k).mul(freq).div(0.32).mul(texMask.mul(0.012).div(sqrt(k)))
+    const dotsGrad = d.mul(e).mul(k).mul(freq).div(0.32).mul(texMask.mul(0.035).div(sqrt(k)))
     const dotsHeight = e.mul(texMask)
     const isGrid = this.texture.equal(1)
     const isDots = this.texture.equal(2)
@@ -207,7 +207,11 @@ export class FilmLook {
     const sigma = log(max(this.tint, vec3(0.01))).negate().mul(this.density)
     const view = normalize(cameraPosition.sub(positionWorld))
     const path = float(1).div(max(abs(dot(bent, view)), 0.15))
-    film.colorNode = exp(sigma.mul(path).negate())
+    const transmittance = exp(sigma.mul(path).negate())
+    film.colorNode = transmittance
+    // A thin film reflects off its back surface too, and that light crosses the film twice: so
+    // half the specular carries the tint squared. On black this is where the colour shows.
+    film.specularColorNode = mix(vec3(1), transmittance.mul(transmittance), 0.5)
     // Clear PE scatters almost nothing diffusely: on black, any diffuse share turns the film gray.
     film.transmissionNode = float(1)
     film.thicknessNode = dome.mul(this.lens).mul(oneMinus(popped.mul(0.8)))
