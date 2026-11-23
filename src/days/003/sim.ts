@@ -26,9 +26,15 @@ import {
 } from 'three/tsl'
 import type { ComputeNode, Node, StorageBufferNode, WebGPURenderer } from 'three/webgpu'
 
-/** Fastest water (cells per unit time), and deepest cut per step (cells). */
+/**
+ * Fastest water (cells per unit time) and deepest cut per step (cells) on the 512 grid. Heights
+ * are in cells, so at other resolutions these and the rain scale with the cell count, and the
+ * same world-space terrain erodes alike, just at finer or coarser detail. The carrying capacity
+ * stays put: the pipe flow's speed already grows with the water depth in cells.
+ */
 const MAX_SPEED = 6
 const MAX_CUT = 0.05
+const BASE_GRID = 512
 
 /** Most octaves the generator sums; the Octaves dial gates the rest off. */
 const MAX_OCTAVES = 10
@@ -58,8 +64,10 @@ export type ErosionParams = {
 /** World size of the terrain square. */
 export const SIZE = 10
 
-/** Cells per side: phones get a quarter of the cells. */
-export const gridFor = (compact: boolean) => (compact ? 256 : 512)
+/** Terrain resolution choices (cells per side). Phones default to 256 and stop at 512. */
+export const RESOLUTIONS = [128, 256, 512, 1024] as const
+export const defaultResolution = (compact: boolean) => (compact ? 256 : 512)
+export const maxResolution = (compact: boolean) => (compact ? 512 : 1024)
 
 type I = Node<'int'>
 type F = Node<'float'>
@@ -77,6 +85,8 @@ export class ErosionSim {
   readonly n: number
   /** Cell size in world units. */
   readonly cell: number
+  /** Cells per world unit relative to the 512 grid. */
+  readonly scale: number
   /** Per cell: terrain height, water depth, suspended sediment, initial height (cells). */
   readonly state: StorageBufferNode<'vec4'>
   readonly state2: StorageBufferNode<'vec4'>
@@ -106,6 +116,8 @@ export class ErosionSim {
   constructor(n: number) {
     this.n = n
     this.cell = SIZE / (n - 1)
+    this.scale = (n - 1) / (BASE_GRID - 1)
+    const scale = this.scale
     const count = n * n
     this.state = instancedArray(count, 'vec4')
     this.state2 = instancedArray(count, 'vec4')
@@ -209,7 +221,7 @@ export class ErosionSim {
       const wz = fromT.sub(f.z).add(f.w).sub(fromB).mul(0.5)
       // Capped: a thin film racing down a cliff would otherwise carve without limit.
       const raw = vec2(wx, wz).div(max(mean, 0.01))
-      const v = raw.mul(min(float(1), float(MAX_SPEED).div(max(length(raw), 1e-6))))
+      const v = raw.mul(min(float(1), float(MAX_SPEED * scale).div(max(length(raw), 1e-6))))
       velocity.element(i).assign(vec4(v, mean, 0))
       state.element(i).assign(vec4(s.x, d2, s.z, s.w))
     })().compute(count)
@@ -228,13 +240,13 @@ export class ErosionSim {
       const tilt = max(length(grad).div(sqrt(grad.dot(grad).add(1))), 0.05)
       const v = velocity.element(i)
       // Shallow sheet flow carries less than a channel: capacity ramps in with depth.
-      const depthLimit = clamp(v.z.mul(4), 0, 1)
+      const depthLimit = clamp(v.z.mul(4 / scale), 0, 1)
       const capacity = this.capacity.mul(tilt).mul(length(v.xy)).mul(depthLimit)
       const take = this.erosion.mul(capacity.sub(s.z)).mul(this.dt)
       const drop = this.deposition.mul(s.z.sub(capacity)).mul(this.dt)
       const change = select(capacity.greaterThan(s.z), take.negate(), drop)
       // A little per step at most, so the bed follows the flow instead of outrunning it.
-      const dh = clamp(change, float(-MAX_CUT), s.z)
+      const dh = clamp(change, float(-MAX_CUT * scale), s.z)
       state2.element(i).assign(vec4(s.x.add(dh), s.y, s.z.sub(dh), s.w))
     })().compute(count)
 
@@ -298,7 +310,7 @@ export class ErosionSim {
   }
 
   setErosion(p: ErosionParams) {
-    this.rain.value = p.rain
+    this.rain.value = p.rain * this.scale
     this.capacity.value = p.capacity
     this.erosion.value = p.erosion
     this.deposition.value = p.deposition

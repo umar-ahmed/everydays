@@ -1,6 +1,10 @@
 import { DialRoot, useDialKitController, type DialConfig } from 'dialkit'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { TerrainApp, webgpuAvailable, type Params, type Stats } from './app.ts'
+import { TerrainApp, compactDevice, webgpuAvailable, type Params, type Stats } from './app.ts'
+import { PALETTES, PALETTE_NAMES, type PaletteName } from './palettes.ts'
+import { RESOLUTIONS, defaultResolution, maxResolution } from './sim.ts'
+
+const compact = compactDevice()
 
 const dialConfig = {
   erode: true,
@@ -10,6 +14,23 @@ const dialConfig = {
     roughness: [0.5, 0.25, 0.75, 0.01],
     'ridge mix': [0.55, 0, 1, 0.01],
     'height scale': [2.4, 0.5, 4, 0.05],
+    // Cells per side; the same mountains, finer or coarser. Phones stop at 512.
+    resolution: {
+      type: 'select',
+      options: RESOLUTIONS.filter((r) => r <= maxResolution(compact)).map(String),
+      default: String(defaultResolution(compact)),
+    },
+  },
+  look: {
+    palette: { type: 'select', options: [...PALETTE_NAMES], default: 'alpine' },
+  },
+  snow: {
+    // Fraction of the peak height; picking a palette resets it to that palette's line.
+    'snow line': [PALETTES.alpine.snowLine, 0, 1.5, 0.01],
+    softness: [0.06, 0, 0.3, 0.005],
+    'slope limit': [55, 10, 75, 1],
+    'aspect bias': [0.35, 0, 1, 0.01],
+    sparkle: [0.5, 0, 1, 0.01],
   },
   erosion: {
     'rain amount': [0.012, 0, 0.05, 0.001],
@@ -50,7 +71,21 @@ export function Terrain() {
     iterations: v.erosion['iterations per frame'],
     eroding: v.erode,
     view: v.view['debug view'] as Params['view'],
+    resolution: Number(v.terrain.resolution),
+    palette: v.look.palette as PaletteName,
+    snowLine: v.snow['snow line'],
+    snowSoftness: v.snow.softness,
+    snowSlope: v.snow['slope limit'],
+    snowAspect: v.snow['aspect bias'],
+    sparkle: v.snow.sparkle,
   }
+  // A new palette brings its own snow line (Alpine snow-capped, Desert bare, Arctic white).
+  const palette = useRef(params.palette)
+  useEffect(() => {
+    if (palette.current === params.palette) return
+    palette.current = params.palette
+    dial.setValue('snow.snow line', PALETTES[params.palette].snowLine)
+  }, [params.palette, dial])
   const paramsRef = useRef(params)
   const container = useRef<HTMLDivElement>(null)
   const appRef = useRef<TerrainApp | null>(null)

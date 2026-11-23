@@ -1,12 +1,20 @@
 import {
   clamp,
+  dot,
   exp,
   float,
+  floor,
   fract,
+  fwidth,
   int,
   max,
+  min,
   mix,
+  mx_noise_float,
   normalize,
+  pow,
+  sin,
+  vec2,
   positionWorld,
   select,
   smoothstep,
@@ -19,14 +27,30 @@ import {
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import * as THREE from 'three/webgpu'
 import type { Node } from 'three/webgpu'
-import { ErosionSim, SIZE, gridFor, type ErosionParams, type TerrainParams } from './sim.ts'
+import { Look, PALETTES, type PaletteName } from './palettes.ts'
+import { ErosionSim, SIZE, defaultResolution, maxResolution, type ErosionParams, type TerrainParams } from './sim.ts'
 
 export type Params = TerrainParams &
   ErosionParams & {
     eroding: boolean
     iterations: number
     view: 'shaded' | 'water' | 'erosion'
+    /** Cells per side of the heightfield. */
+    resolution: number
+    palette: PaletteName
+    /** Snow: line (fraction of peak height), softness, slope limit (degrees), aspect bias, sparkle. */
+    snowLine: number
+    snowSoftness: number
+    snowSlope: number
+    snowAspect: number
+    sparkle: number
   }
+
+/** Phones get a smaller default grid and stop at 512 (see sim.ts). */
+export const compactDevice = () => typeof screen !== 'undefined' && Math.min(screen.width, screen.height) < 600
+
+/** Direction toward the sun (the key light sits at -6, 5, 3). */
+const SUN = new THREE.Vector3(-6, 5, 3).normalize()
 
 export type Stats = { steps: number }
 
@@ -46,7 +70,10 @@ export class TerrainApp {
   private scene = new THREE.Scene()
   private camera = new THREE.PerspectiveCamera(40, 1, 0.05, 200)
   private controls: OrbitControls
-  readonly sim: ErosionSim
+  sim: ErosionSim
+  private mesh: THREE.Mesh | null = null
+  private look = new Look()
+  private palette = ''
   private params: Params
   private key = ''
   private view = uniform(0, 'int')
@@ -61,11 +88,11 @@ export class TerrainApp {
     this.container = container
     this.params = params
     this.onStats = onStats
-    const compact = Math.min(screen.width, screen.height) < 600
-    this.sim = new ErosionSim(gridFor(compact))
+    this.sim = new ErosionSim(this.resolutionFor(params.resolution))
     this.renderer = new THREE.WebGPURenderer({ antialias: true })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-    this.renderer.toneMapping = THREE.AgXToneMapping
+    // Neutral keeps the palettes' hues and saturation (AgX greyed the presets out).
+    this.renderer.toneMapping = THREE.NeutralToneMapping
     const canvas = this.renderer.domElement
     canvas.style.display = 'block'
     canvas.style.width = '100%'
@@ -98,7 +125,8 @@ export class TerrainApp {
     controls.maxPolarAngle = Math.PI * 0.47
     controls.update()
 
-    scene.add(this.makeTerrain())
+    this.mesh = this.makeTerrain()
+    scene.add(this.mesh)
     this.apply(this.params, true)
     this.resize.observe(this.container)
     this.fit()
@@ -155,28 +183,61 @@ export class TerrainApp {
     const water = varying(s.y)
     const change = varying(s.x.sub(s.w))
 
+    const { look } = this
     // Slope: 1 flat, 0 vertical.
     const flat = normal.y
     const steep = smoothstep(0.86, 0.6, flat)
     const relief = height.div(max(sim.heightCells, 1))
-    const soil = mix(vec3(0.32, 0.36, 0.17), vec3(0.42, 0.4, 0.26), smoothstep(0.25, 0.6, relief))
-    // Exposed rock shows strata: bands in height, warmer where the water cut through them.
-    const band = smoothstep(0.3, 0.7, fract(positionWorld.y.mul(5.5))).mul(0.05)
-    const rock = mix(vec3(0.38, 0.35, 0.32), vec3(0.5, 0.36, 0.27), smoothstep(-0.3, -3, change)).add(
-      band.mul(steep).sub(0.025),
+    const t = clamp(relief, 0, 1)
+    // Height ramp for gentle ground: four stops at 0, 0.3, 0.6 and 1 of the peak height.
+    const ramp = mix(
+      mix(mix(look.ramp[0], look.ramp[1], smoothstep(0, 0.3, t)), look.ramp[2], smoothstep(0.3, 0.6, t)),
+      look.ramp[3],
+      smoothstep(0.6, 1, t),
     )
-    const sand = vec3(0.74, 0.65, 0.47)
+    // Contour lines every 5% of the peak height, antialiased in screen space.
+    const iso = relief.mul(20)
+    const isoDist = min(fract(iso), float(1).sub(fract(iso))).div(max(fwidth(iso), 1e-4))
+    const ground = ramp.mul(float(1).sub(look.contours.mul(float(1).sub(clamp(isoDist, 0, 1)))))
+    // Exposed rock shows strata: bands in height, warmer where the water cut through them.
+    const band = smoothstep(0.3, 0.7, fract(positionWorld.y.mul(5.5)))
+      .sub(0.5)
+      .mul(look.strata)
+    const rock = mix(look.rock, look.rockCut, smoothstep(-0.3, -3, change)).add(band.mul(steep))
     const deposited = smoothstep(0.02, 0.35, change)
-    let albedo = mix(soil, rock, steep)
-    albedo = mix(albedo, sand, deposited.mul(float(1).sub(steep.mul(0.7))))
-    // Snow caps the highest flat ground.
-    albedo = mix(albedo, vec3(0.92, 0.94, 0.97), smoothstep(0.78, 0.92, relief).mul(smoothstep(0.7, 0.9, flat)))
-    // Wet ground darkens; standing and running water tints by depth.
+    let albedo = mix(ground, rock, steep.mul(look.rockiness))
+    albedo = mix(albedo, look.sand, deposited.mul(float(1).sub(steep.mul(0.7))))
     const wet = smoothstep(0.002, 0.05, water)
+
+    // Snow: above a noisy snow line, lower on slopes facing away from the sun, only where the
+    // ground is flatter than the slope limit (ledges hold it, sheer cliffs don't), and melted
+    // where water runs.
+    const wobble = mx_noise_float(positionWorld.mul(1.3))
+      .mul(0.65)
+      .add(mx_noise_float(positionWorld.mul(5.1)).mul(0.35))
+    const shade = dot(normalize(vec3(normal.x, 0, normal.z).add(vec3(1e-4, 0, 0))), vec3(-SUN.x, 0, -SUN.z).normalize())
+    const sideways = float(1).sub(flat).mul(4).clamp(0, 1)
+    const line = look.snowLine
+      .sub(shade.mul(sideways).mul(look.snowAspect).mul(0.12))
+      .add(wobble.mul(look.snowSoftness).mul(0.9))
+    const soft = max(look.snowSoftness, 0.005)
+    const snow = smoothstep(line.sub(soft), line.add(soft), relief)
+      .mul(smoothstep(look.snowSlope.sub(0.06), look.snowSlope.add(0.04), flat))
+      .mul(float(1).sub(wet))
+    albedo = mix(albedo, vec3(0.92, 0.94, 0.98), snow)
+
+    // Wet ground darkens; standing and running water tints by depth.
     albedo = albedo.mul(mix(float(1), float(0.55), wet))
     const depth = float(1).sub(exp(water.mul(-1.2)))
-    const waterColor = mix(vec3(0.16, 0.32, 0.36), vec3(0.04, 0.13, 0.22), depth)
+    const waterColor = mix(look.water, look.water.mul(0.3), depth)
     const shaded = mix(albedo, waterColor, depth.mul(0.92))
+    // Sun-facing glints in the snow.
+    const cellHash = fract(sin(dot(floor(positionWorld.xz.mul(160)), vec2(12.9898, 78.233))).mul(43758.5453))
+    const glint = smoothstep(0.985, 1, cellHash)
+      .mul(pow(max(dot(normal, vec3(SUN.x, SUN.y, SUN.z)), 0), float(6)))
+      .mul(snow)
+      .mul(look.sparkle)
+    material.emissiveNode = vec3(glint.mul(2.5))
     // Debug views: water depth, and terrain change (blue cut, orange filled).
     const waterView = mix(vec3(0.08), vec3(0.2, 0.6, 1), clamp(water.mul(2), 0, 1))
     const erosionView = select(
@@ -186,7 +247,7 @@ export class TerrainApp {
     )
     const viewMode = this.view
     material.colorNode = select(viewMode.equal(0), shaded, select(viewMode.equal(1), waterView, erosionView))
-    material.roughnessNode = mix(float(0.92), float(0.25), clamp(wet.add(depth), 0, 1))
+    material.roughnessNode = mix(mix(float(0.92), float(0.25), clamp(wet.add(depth), 0, 1)), float(0.6), snow)
 
     const mesh = new THREE.Mesh(geometry, material)
     mesh.frustumCulled = false
@@ -198,7 +259,40 @@ export class TerrainApp {
     this.apply(params, false)
   }
 
+  private resolutionFor(requested: number) {
+    const compact = compactDevice()
+    return Math.min(requested || defaultResolution(compact), maxResolution(compact))
+  }
+
+  /** A new sim and mesh at another grid size; the noise is in sheet coordinates, so the same
+   * mountains come back, just finer or coarser. */
+  private rebuild(n: number) {
+    if (this.mesh) {
+      this.scene.remove(this.mesh)
+      this.mesh.geometry.dispose()
+      ;(this.mesh.material as THREE.Material).dispose()
+    }
+    this.sim = new ErosionSim(n)
+    this.mesh = this.makeTerrain()
+    this.scene.add(this.mesh)
+  }
+
   private apply(p: Params, force: boolean) {
+    const n = this.resolutionFor(p.resolution)
+    if (n !== this.sim.n) {
+      this.rebuild(n)
+      force = true
+    }
+    const { look } = this
+    if (p.palette !== this.palette) {
+      this.palette = p.palette
+      look.setPalette(PALETTES[p.palette])
+    }
+    look.snowLine.value = p.snowLine
+    look.snowSoftness.value = p.snowSoftness
+    look.snowSlope.value = Math.cos((p.snowSlope * Math.PI) / 180)
+    look.snowAspect.value = p.snowAspect
+    look.sparkle.value = p.sparkle
     this.sim.setTerrain(p)
     this.sim.setErosion(p)
     this.view.value = ['shaded', 'water', 'erosion'].indexOf(p.view)
