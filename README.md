@@ -22,7 +22,7 @@ npm run og            # regenerate the Open Graph cards (see below)
 
 `vp lint` and `vp fmt` run the linter and formatter on their own. Lint and format settings live in the `lint` and `fmt` blocks of `vite.config.ts`.
 
-`vp run check:gpu` runs the real day 002 bubble-map generator on SwiftShader WebGPU in headless Chromium and checks every sheet, layout and camera invariant across five viewports. It needs Playwright's Chromium (`vp exec playwright install --only-shell chromium`) and takes a minute or two. It is a cached Vite Task: it replays instantly until something under `src/days/002/`, `scripts/check-002/`, `src/days.ts`, `vite.config.ts` or the lockfile changes. `vp cache clean` forces a rerun.
+`vp run check:gpu` runs the real day 002 bubble-map generator on SwiftShader WebGPU in headless Chromium and checks every sheet, layout and camera invariant across five viewports. It then runs the real cloth sim: presses one bubble (center, edge and corner, with and without an edge margin, on desktop and phone sheets) and asserts that nothing else pops, kinetic energy dies down and the sheet stays flat. `ONLY=sheets` or `ONLY=stability` runs one half. It needs Playwright's Chromium (`vp exec playwright install --only-shell chromium`) and takes several minutes. It is a cached Vite Task: it replays instantly until something under `src/days/002/`, `scripts/check-002/`, `src/days.ts`, `vite.config.ts` or the lockfile changes. `vp cache clean` forces a rerun.
 
 ## Days
 

@@ -42,6 +42,8 @@ const VIEWPORTS = [
 const ACROSS = [3, 8, 16]
 const SIZE = [0.6, 1.35, 2.2]
 const SPACING = [0.1, 0.86, 1]
+/** Edge margins (cm), tried at 8 across: none (the original edge), the default and a wide one. */
+const MARGINS = [0, 0.4, 1.2]
 const DEPTH_MARGIN = 8
 
 type Result = { configs: number; failures: string[]; summary: Record<string, string | number> }
@@ -68,6 +70,7 @@ async function run(): Promise<Result> {
   let minGapRatio = Infinity
   let minFill = Infinity
   let poses = 0
+  let minBorder = Infinity
 
   for (const vp of VIEWPORTS) {
     const view: View = { width: vp.width, height: vp.height }
@@ -78,13 +81,13 @@ async function run(): Promise<Result> {
     for (const tiling of TILINGS) {
       const lattice = latticeFor(tiling)
       for (const shape of SHAPES) {
-        for (const across of ACROSS) {
+        for (const [across, margin] of ACROSS.flatMap((a) => (a === 8 ? MARGINS : [0]).map((m) => [a, m]))) {
           for (const size of SIZE) {
             for (const spacing of SPACING) {
               configs++
-              const label = `${vp.name} ${tiling}/${shape} across=${across} size=${size} spacing=${spacing}`
+              const label = `${vp.name} ${tiling}/${shape} across=${across} margin=${margin} size=${size} spacing=${spacing}`
               const fail = (msg: string) => failures.push(`${label}: ${msg}`)
-              const layout = layoutFor({ size, spacing, across, aspect, lattice, budget: vp.budget })
+              const layout = layoutFor({ size, spacing, across, aspect, lattice, margin, budget: vp.budget })
               const texels = layout.mapW * layout.mapH
               if (texels > MAX_MAP) fail(`map ${texels} texels > capacity ${MAX_MAP}`)
               generator.configure(layout, { tiling, shape })
@@ -111,6 +114,7 @@ async function run(): Promise<Result> {
               const covered = new Uint8Array(sheet.count)
               let maxCover = 0
               let edgeTouch = 0
+              let nearestEdge = Infinity
               for (let t = 0; t < texels; t++) {
                 const id = sheet.map[t * 4]
                 const sd = sheet.map[t * 4 + 1]
@@ -121,12 +125,23 @@ async function run(): Promise<Result> {
                   const tx = t % layout.mapW
                   const ty = Math.floor(t / layout.mapW)
                   if (tx === 0 || ty === 0 || tx === layout.mapW - 1 || ty === layout.mapH - 1) edgeTouch++
+                  nearestEdge = Math.min(
+                    nearestEdge,
+                    Math.min(tx, ty, layout.mapW - 1 - tx, layout.mapH - 1 - ty) * layout.texel,
+                  )
                 }
               }
               const missing = covered.reduce((n, c) => n + (c ? 0 : 1), 0)
               if (missing) fail(`${missing} ids have no footprint (ids not dense)`)
               if (maxCover > 1) fail(`footprints overlap (coverage ${maxCover})`)
               if (edgeTouch) fail(`${edgeTouch} footprint texels touch the sheet edge (cut-off bubble)`)
+              // Footprint plus seal band stay inside the sheet by the border (half spacing + margin).
+              if (nearestEdge < layout.border - 1.5 * layout.texel) {
+                fail(
+                  `a footprint is ${nearestEdge.toFixed(3)} cm from the edge, border is ${layout.border.toFixed(3)} cm`,
+                )
+              }
+              minBorder = Math.min(minBorder, nearestEdge - margin)
               if (tiling === 'square' && sheet.count !== layout.cols * layout.rows) {
                 fail(`square tiling has ${sheet.count} bubbles, expected ${layout.cols * layout.rows}`)
               }
@@ -281,6 +296,7 @@ async function run(): Promise<Result> {
         ]),
       ),
       'min fill of the safe area': `${(minFill * 100).toFixed(0)}%`,
+      'min footprint-to-edge film beyond the margin': `${minBorder.toFixed(3)} cm`,
       'nearest-neighbour / pitch (min)': minGapRatio.toFixed(4),
       'tightest depth margin': `${(DEPTH_MARGIN / worstDepth).toFixed(0)}x over ${poses} fit and zoomed poses`,
       'render 4x max': `${worstRender.verts} / ${MAX_RENDER_VERTS} vertices, index ${(worstRender.indexBytes / 2 ** 20).toFixed(1)} MiB, storage ${(storageBytes / 2 ** 20).toFixed(1)} MiB per buffer (6 buffers incl. back film), back-film index up to ${(worstBack / 2 ** 20).toFixed(1)} MiB`,
