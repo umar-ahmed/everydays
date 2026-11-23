@@ -32,6 +32,8 @@ export type StabilityResult = {
   name: string
   bubbles: number
   popAt: number
+  /** Seconds of pressing until the pop. */
+  pressFor: number
   samples: Sample[]
   failures: string[]
 }
@@ -156,9 +158,28 @@ export async function runScenario(
   // Press until the target pops (at most 4 s), then let go.
   let popAt = -1
   const pressStart = time
-  for (let f = 0; time < pressStart + 4 && popAt < 0; f++) {
+  let pressFor = -1
+  for (let f = 0; time < pressStart + 10 && popAt < 0; f++) {
     frame(true)
-    if (f % 6 === 5 && (await poppedCount()) > 0) popAt = time
+    if (query.has('verbose') && f % 30 === 0) {
+      const S = new Float32Array(await renderer.getArrayBufferAsync(sim.state.value, null, 0, sheet.count * 16))
+      const X = new Float32Array(await renderer.getArrayBufferAsync(sim.x.value, null, 0, n * 16))
+      let capMin = Infinity
+      let capMax = -Infinity
+      for (let k = 0; k < n; k++) {
+        if (sheet.meta[k * 4 + 1] > 0.5 && sheet.meta[k * 4] === target) {
+          capMin = Math.min(capMin, X[k * 4 + 1])
+          capMax = Math.max(capMax, X[k * 4 + 1])
+        }
+      }
+      console.log(
+        `press t=${(time - pressStart).toFixed(2)} target ${target} at (${cx.toFixed(2)},${cz.toFixed(2)}) gauge ${S[target * 4].toFixed(3)} V/V0 ${(S[target * 4 + 1] / sheet.bubbles[target * 4 + 3]).toFixed(3)} fingerY ${fingerY.toFixed(2)} cap y ${capMin.toFixed(3)}..${capMax.toFixed(3)}`,
+      )
+    }
+    if (f % 6 === 5 && (await poppedCount()) > 0) {
+      popAt = time
+      pressFor = time - pressStart
+    }
   }
   if (popAt < 0) failures.push('the pressed bubble never popped')
 
@@ -193,7 +214,7 @@ export async function runScenario(
   }
   if (last.spread > sheet.size)
     failures.push(`sheet drifted/rolled up: a vertex moved ${last.spread.toFixed(2)} cm in plane`)
-  return { name: sc.name, bubbles: sheet.count, popAt, samples, failures, hot }
+  return { name: sc.name, bubbles: sheet.count, popAt, pressFor, samples, failures, hot }
 }
 
 const DESKTOP = { view: { width: 1280, height: 800 }, phone: false }

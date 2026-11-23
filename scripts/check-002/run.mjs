@@ -45,6 +45,7 @@ try {
   if (only !== 'sheets') {
     const page = await browser.newPage()
     page.on('pageerror', (e) => console.error('page error:', e.message))
+    page.on('console', (m) => process.env.VERBOSE && console.log(m.text()))
     const started = Date.now()
     const query = process.env.QUERY ? `?${process.env.QUERY}` : ''
     await page.goto(`http://127.0.0.1:${port}/scripts/check-002/stability.html${query}`)
@@ -61,7 +62,7 @@ try {
         const peak = Math.max(...r.samples.map((s) => s.energy))
         const pops = Math.max(...r.samples.map((s) => s.popped))
         console.log(
-          `  ${r.failures.length ? 'FAIL' : 'ok  '} ${r.name}: ${r.bubbles} bubbles, ${pops} popped, energy ${peak.toExponential(1)} -> ${last.energy.toExponential(1)} in ${last.t}s, height ${last.height.toFixed(2)} cm, max in-plane drift ${last.spread.toFixed(2)} cm`,
+          `  ${r.failures.length ? 'FAIL' : 'ok  '} ${r.name}: ${r.bubbles} bubbles, popped after ${r.pressFor.toFixed(2)}s of pressing, ${pops} popped in all, energy ${peak.toExponential(1)} -> ${last.energy.toExponential(1)} in ${last.t}s, height ${last.height.toFixed(2)} cm, max in-plane drift ${last.spread.toFixed(2)} cm`,
         )
         for (const f of r.failures) console.error(`       ${f}`)
         if (r.failures.length) {
