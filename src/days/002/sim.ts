@@ -113,7 +113,10 @@ export class BubbleSim {
   readonly quadList = instancedArray(MAX_QUADS, 'float')
   /** Live state per bubble: gauge pressure, volume, gas content (atm), pinhole flag. */
   readonly state = instancedArray(MAX_BUBBLES, 'vec4')
-  /** Per bubble: height of its seal ring this substep (the back film's level under the cap). */
+  /**
+   * Per bubble, this substep: seal-ring height (the back film's level under the cap), and the
+   * gas reaction (acceleration) each seal-ring corner incidence takes.
+   */
   readonly base = instancedArray(MAX_BUBBLES, 'vec4')
   /**
    * Debug channels, written only while `debug` is 1. diag: stretch strain (signed, mean over the
@@ -152,11 +155,9 @@ export class BubbleSim {
   /**
    * The flat back film the domes are sealed onto, for rendering only: bonded vertices (outside
    * every footprint) copy the cloth, and a harmonic fill spans each footprint at its seal-ring
-   * height, kept under the cap. The sim must not read it: the seal ring is part of the cloth the
-   * cap pulls on, so a floor or volume base derived from it closes a loop (cap lifts ring, ring
-   * lifts floor, floor shoves cap) that a free sheet edge amplifies into a runaway. The sheet
-   * lies on the table, which carries the back film, so caps rest on and gas is measured from the
-   * table plane.
+   * height, kept under the cap. The sim never reads it (it is a frame stale). Gas is measured
+   * from each bubble's live seal-ring height (`base`), the gas pushes the ring down as hard as
+   * it pushes the cap up, and collapsed caps rest on the table, which carries the back film.
    */
   readonly back = instancedArray(MAX_VERTS, 'vec4')
   readonly back2 = instancedArray(MAX_VERTS, 'vec4')
@@ -186,6 +187,8 @@ export class BubbleSim {
       const range = quadRange.element(b)
       const first = int(range.x)
       const volume = float(0).toVar()
+      const area = float(0).toVar()
+      const capArea = float(0).toVar()
       const ring = float(0).toVar()
       const ringCount = float(0).toVar()
       // Each bubble sums its own quads (any footprint shape or layout), as listed by the sheet.
@@ -202,6 +205,14 @@ export class BubbleSim {
         const c = p3.sub(p1)
         const qa = a.x.mul(c.z).sub(a.z.mul(c.x)).mul(0.5)
         volume.addAssign(qa.mul(p0.y.add(p1.y).add(p2.y).add(p3.y)).mul(0.25))
+        area.addAssign(qa)
+        const insideCorners = meta
+          .element(i0)
+          .y.add(meta.element(i0.add(1)).y)
+          .add(meta.element(i0.add(uW).add(1)).y)
+          .add(meta.element(i0.add(uW)).y)
+        // The share of this quad that the cap's vertex areas cover, as in the pressure force.
+        capArea.addAssign(qa.mul(insideCorners).mul(0.25))
         // Corners outside the footprint are the seal ring the back film is bonded to.
         for (const [k, pk] of [
           [i0, p0],
@@ -214,8 +225,9 @@ export class BubbleSim {
           ringCount.addAssign(select(sealed, float(1), float(0)))
         }
       })
-      // Seal-ring height, for drawing the back film; the gas is measured from the table.
-      this.base.element(b).assign(vec4(ring.div(max(ringCount, 1)), 0, 0, 0))
+      // Gas sits between the cap and the back film, which is bonded at the seal ring.
+      const ringHeight = ring.div(max(ringCount, 1))
+      volume.subAssign(area.mul(ringHeight))
       const pop = pops.element(b)
       const v0 = pop.w
       const st = state.element(b)
@@ -238,7 +250,13 @@ export class BubbleSim {
       )
       // Venting continues until the inside is at atmospheric for the current volume.
       const left = max(gas.sub(leak.mul(this.dt)), pow(squeeze, -GAMMA))
-      st.assign(vec4(select(intact, gauge, float(0)), volume, left, pinhole))
+      const pushing = select(intact, gauge, float(0))
+      st.assign(vec4(pushing, volume, left, pinhole))
+      // The gas pushes the back film down as hard as it pushes the cap up. The back film hands
+      // that to the seal ring, so each ring corner incidence takes an equal share: the sheet
+      // feels no net force from its own bubbles and cannot lift itself off the table.
+      const reaction = pushing.mul(this.kPressure).mul(capArea).div(this.uH2).div(max(ringCount, 1))
+      this.base.element(b).assign(vec4(ringHeight, reaction, 0, 0))
     })().compute(MAX_BUBBLES)
 
     const around = (i: ReturnType<typeof int>, buf: typeof x = x) => {
@@ -257,7 +275,48 @@ export class BubbleSim {
       const info = meta.element(i)
       const gauge = state.element(int(info.x)).x
       const push = around(i).mul(gauge.mul(this.kPressure).mul(info.y).div(this.uH2))
-      const acc = vec3(0, this.gravity.negate(), 0).add(push)
+      // Seal-ring vertices take the back film's share of every bubble whose quads they touch.
+      const pull = float(0).toVar()
+      If(info.y.lessThan(0.5), () => {
+        const ix = i.mod(uW)
+        const iy = i.div(uW)
+        for (const [qx, qy] of [
+          [-1, -1],
+          [0, -1],
+          [-1, 0],
+          [0, 0],
+        ]) {
+          const x0 = ix.add(qx)
+          const y0 = iy.add(qy)
+          If(
+            x0
+              .greaterThanEqual(0)
+              .and(y0.greaterThanEqual(0))
+              .and(x0.lessThan(uW.sub(1)))
+              .and(y0.lessThan(uH.sub(1))),
+            () => {
+              const c = y0.mul(uW).add(x0)
+              const m = [
+                meta.element(c),
+                meta.element(c.add(1)),
+                meta.element(c.add(uW)),
+                meta.element(c.add(uW).add(1)),
+              ]
+              const owner = select(
+                m[0].y.greaterThan(0.5),
+                m[0].x,
+                select(m[1].y.greaterThan(0.5), m[1].x, select(m[2].y.greaterThan(0.5), m[2].x, m[3].x)),
+              )
+              If(m[0].y.add(m[1].y).add(m[2].y).add(m[3].y).greaterThan(0.5), () => {
+                pull.addAssign(this.base.element(int(owner)).y)
+              })
+            },
+          )
+        }
+      })
+      const acc = vec3(0, this.gravity.negate(), 0)
+        .add(push)
+        .sub(vec3(0, pull, 0))
       const vel = v
         .element(i)
         .xyz.add(acc.mul(this.dt))
@@ -339,7 +398,7 @@ export class BubbleSim {
       const clamped = pos.toVar()
       // A collapsed cap rests on the back film, which lies on the table.
       const onCap = meta.element(i).y.greaterThan(0.5)
-      const depth = select(onCap, max(this.capGap.sub(pos.y), 0), float(0))
+      const depth = select(onCap, max(this.capGap.sub(pos.y), 0), float(0)).toVar()
       If(onCap.and(pos.y.lessThan(this.capGap)), () => {
         pos.assign(vec3(pos.x, this.capGap, pos.z))
       })
