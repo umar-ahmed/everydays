@@ -20,6 +20,13 @@ export const days: Day[] = [
       'Physically based bubble wrap: an XPBD cloth with gas-filled domes on the GPU that pop, with synthesized sound, when you squeeze them.',
     date: '2026-11-22',
   },
+  {
+    slug: '003',
+    title: 'terrain',
+    concept:
+      'A procedural mountain range eroded on the GPU: fractal noise terrain, rain carving valleys and river channels, sediment fans and cliffs, live.',
+    date: '2026-11-23',
+  },
 ]
 
 export const site = {

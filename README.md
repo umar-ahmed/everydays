@@ -2,7 +2,7 @@
 
 A home for daily 30-minute interactive toys, one per numbered day. Each day is its own page (`/001/`, `/002/`, …) and the root `/` lists them all.
 
-Built with Vite + React + TypeScript, [Motion](https://motion.dev) (`motion/react`), [DialKit](https://github.com/joshpuckett/dialkit) for live tuning panels, and Tailwind. Day 002 uses [three.js](https://threejs.org) with its WebGPU renderer and TSL compute shaders.
+Built with Vite + React + TypeScript, [Motion](https://motion.dev) (`motion/react`), [DialKit](https://github.com/joshpuckett/dialkit) for live tuning panels, and Tailwind. Days 002 and 003 use [three.js](https://threejs.org) with its WebGPU renderer and TSL compute shaders.
 
 ## Run it
 
@@ -30,6 +30,7 @@ npm run og            # regenerate the Open Graph cards (see below)
 | ------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | [001](./001/) | gooey cursor blobs | Spring-chained metaballs (SVG blur + alpha-threshold filter) that stretch on fast moves and melt back together. Click to drop blobs, then drag the goo into them. On a phone, tilt sets gravity: drops roll like marbles of goo, coast when you level out and bounce off the edges (iOS asks via an "enable tilt" button).                                                                                                                                   |
 | [002](./002/) | bubble wrap        | An XPBD cloth on the GPU (WebGPU compute, many small substeps of Jacobi passes) whose domes hold gas: squeezing one raises its pressure adiabatically until it bursts, collapses and crinkles. Pops are read back from the GPU and synthesised with Web Audio; some bubbles have pinholes and hiss flat instead. Six dome shapes, a finger or rolling pin, thin-film iridescence and a procedural crease shader. Needs WebGPU; other browsers get a message. |
+| [003](./003/) | terrain            | A procedural mountain range eroded live on the GPU (WebGPU compute): seedable fBm/ridged noise terrain, then rain flowing through virtual pipes carves valleys and river channels, fills lakes and drops sediment fans, with thermal weathering on steep slopes. Shading follows rock, soil, sand, snow and water. Needs WebGPU.                                                                                                                             |
 
 ## Adding a day
 

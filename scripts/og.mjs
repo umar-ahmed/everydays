@@ -17,6 +17,7 @@ const days = [...readFileSync('src/days.ts', 'utf8').matchAll(/slug: '(\d{3})',\
 const [latestSlug, latestTitle] = days.at(-1).slice(1)
 mkdirSync('public/001', { recursive: true })
 mkdirSync('public/002', { recursive: true })
+mkdirSync('public/003', { recursive: true })
 mkdirSync(framesDir, { recursive: true })
 
 const browser = await chromium.launch({
@@ -142,10 +143,30 @@ async function day002() {
   await page.close()
 }
 
+async function day003() {
+  const page = await browser.newPage({ viewport: size, deviceScaleFactor: 1 })
+  // The queued erosion steps keep a software GPU busy for a while before the next frame.
+  page.setDefaultTimeout(600000)
+  await page.goto(`${base}/003/`)
+  await page.waitForFunction(() => window.terrain, null, { timeout: 120000 })
+  await page.mouse.click(size.width - 37, 37)
+  // Pause the live erosion, then carve the default terrain a fixed number of steps.
+  await page.getByRole('button', { name: 'pause' }).click()
+  await page.evaluate(() => {
+    window.terrain.reset()
+    window.terrain.fastForward(4000)
+  })
+  await page.addStyleTag({ content: '.dialkit-root,[data-chrome]{display:none!important}' })
+  await page.waitForTimeout(30000)
+  await page.screenshot({ path: 'public/003/og.png' })
+  await page.close()
+}
+
 if (want('index')) await indexCard()
 if (want('001')) await day001()
 if (want('002')) await day002()
+if (want('003')) await day003()
 await browser.close()
 console.log(
-  `wrote ${only ? [...only].join(', ') : 'index, 001, 002'} cards (day 001 frame ${pick}; frames in ${framesDir})`,
+  `wrote ${only ? [...only].join(', ') : 'index, 001, 002, 003'} cards (day 001 frame ${pick}; frames in ${framesDir})`,
 )
