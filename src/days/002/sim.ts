@@ -336,12 +336,14 @@ export class BubbleSim {
         const pi = src.element(i).xyz
         const ri = rest.element(i)
         const info = meta.element(i)
-        const popped = pops.element(int(info.x)).x
-        const aBend = select(
-          info.y.lessThan(0.5),
-          this.aBendBase,
-          select(popped.greaterThan(0.5), this.aBendPopped, this.aBendDome),
-        )
+        // Bending compliance of a vertex's film: flat, intact dome or popped (crumpled) cap.
+        const bendOf = (m: typeof info) =>
+          select(
+            m.y.lessThan(0.5),
+            this.aBendBase,
+            select(pops.element(int(m.x)).x.greaterThan(0.5), this.aBendPopped, this.aBendDome),
+          )
+        const aBend = bendOf(info)
         const dt2 = this.dt.mul(this.dt)
         const sumStretch = vec3(0).toVar()
         const sumBend = vec3(0).toVar()
@@ -356,7 +358,13 @@ export class BubbleSim {
             const dist = max(length(d), 1e-6)
             const c = dist.sub(length(rest.element(j).xyz.sub(ri.xyz)))
             // Film resists stretching hard and compression barely, so an unpressurised dome buckles.
-            const alpha = kind === 'bend' ? aBend : select(c.greaterThan(0), this.aStretch, this.aCompress)
+            // A constraint has one compliance for both ends (the softer film's), or the two ends
+            // correct unequally and the pair stops conserving momentum, which pumped energy in
+            // where a popped cap meets flat film.
+            const alpha =
+              kind === 'bend'
+                ? max(aBend, bendOf(meta.element(j)))
+                : select(c.greaterThan(0), this.aStretch, this.aCompress)
             ;(kind === 'bend' ? sumBend : sumStretch).addAssign(d.div(dist).mul(c.div(float(2).add(alpha.div(dt2)))))
             count.addAssign(1)
           })
@@ -399,8 +407,9 @@ export class BubbleSim {
       // A collapsed cap rests on the back film, which lies on the table.
       const onCap = meta.element(i).y.greaterThan(0.5)
       const depth = select(onCap, max(this.capGap.sub(pos.y), 0), float(0)).toVar()
+      // With the same friction as the table: a crumpled cap lying on film doesn't skate around.
       If(onCap.and(pos.y.lessThan(this.capGap)), () => {
-        pos.assign(vec3(pos.x, this.capGap, pos.z))
+        pos.assign(vec3(mix(pos.x, prev.x, this.friction), this.capGap, mix(pos.z, prev.z, this.friction)))
       })
       If(this.debug.greaterThan(0.5), () => {
         // v still holds the predicted velocity here, so prev + v dt is the predicted position.
