@@ -30,18 +30,19 @@ jobs:
           enablement: true
       - run: vp check
       - run: vp test
-      # The day 002 GPU check runs the real WebGPU map generator in headless Chromium (SwiftShader).
-      # It is a cached Vite Task; restoring the task cache skips it when nothing it reads changed.
+      # The day 002 sheet checks run the real WebGPU map generator in headless Chromium
+      # (SwiftShader). Cached Vite Tasks: a restored task cache skips them when nothing they
+      # read changed.
       - name: Restore Vite Task cache
         id: vite-task-cache
         uses: actions/cache/restore@v6
         with:
           path: node_modules/.vite/task-cache
-          key: vite-task-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vite-task-build-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            vite-task-${{ runner.os }}-${{ runner.arch }}-
+            vite-task-build-${{ runner.os }}-${{ runner.arch }}-
       - run: vp exec playwright install --only-shell chromium
-      - run: vp run check:gpu
+      - run: vp run check:gpu:sheets
       - name: Save Vite Task cache
         if: success()
         uses: actions/cache/save@v6
@@ -55,8 +56,35 @@ jobs:
         with:
           path: dist
 
+  # Pops one bubble in the real day 002 cloth sim across sheet sizes, edges and margins and
+  # checks nothing else pops and the sheet settles. The slowest check, so it runs in parallel.
+  stability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: voidzero-dev/setup-vp@v1.22.0
+        with:
+          node-version-file: .nvmrc
+          cache: true
+      - name: Restore Vite Task cache
+        id: vite-task-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: node_modules/.vite/task-cache
+          key: vite-task-stability-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            vite-task-stability-${{ runner.os }}-${{ runner.arch }}-
+      - run: vp exec playwright install --only-shell chromium
+      - run: vp run check:gpu:stability
+      - name: Save Vite Task cache
+        if: success()
+        uses: actions/cache/save@v6
+        with:
+          path: node_modules/.vite/task-cache
+          key: ${{ steps.vite-task-cache.outputs.cache-primary-key }}
+
   deploy:
-    needs: build
+    needs: [build, stability]
     runs-on: ubuntu-latest
     environment:
       name: github-pages

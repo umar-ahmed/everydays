@@ -589,7 +589,15 @@ export class BubbleSim {
       for (let k = 1; k < passes; k += 2) list.push(this.solveQP, solvePQ)
       list.push(finalize)
     }
-    list.push(this.normals)
+    void renderer.compute(list)
+  }
+
+  /**
+   * Per-frame passes that only feed rendering and the debug maps: normals with the wrinkle
+   * compression, the debug strain/bend/speed channels and the back film's fill.
+   */
+  updateRender(renderer: WebGPURenderer) {
+    const list: ComputeNode[] = [this.normals]
     for (let k = 0; k < this.backIterations; k += 2) list.push(...this.backFill)
     void renderer.compute(list)
   }

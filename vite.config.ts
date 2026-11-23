@@ -7,6 +7,15 @@ import { days, site } from './src/days.ts'
 
 const root = import.meta.dirname
 
+/** What the day 002 GPU checks exercise, for the task cache. */
+const GPU_CHECK_INPUTS = [
+  'scripts/check-002/**',
+  'src/days/002/**',
+  'src/days.ts',
+  'vite.config.ts',
+  'package-lock.json',
+]
+
 function resolveSiteUrl(env: Record<string, string>): string {
   const explicit = env.SITE_URL || env.VITE_SITE_URL
   if (explicit) return explicit.replace(/\/+$/, '')
@@ -108,14 +117,18 @@ export default defineConfig(({ mode }) => {
     },
     run: {
       tasks: {
-        // Headless Chromium + SwiftShader WebGPU validation of the day 002 bubble map, sheet and
-        // camera invariants. Slow (minutes), so it is cached on exactly what it exercises.
-        'check:gpu': {
-          command: 'node scripts/check-002/run.mjs',
-          cache: {
-            input: ['scripts/check-002/**', 'src/days/002/**', 'src/days.ts', 'vite.config.ts', 'package-lock.json'],
-            output: [],
-          },
+        // Headless Chromium + SwiftShader WebGPU validation of day 002: the bubble map, sheet and
+        // camera invariants (sheets) and single-pop stability of the real cloth sim (stability).
+        // Slow (minutes), so each half is cached on exactly what it exercises; CI runs the halves
+        // as parallel jobs.
+        'check:gpu': { command: 'node scripts/check-002/run.mjs', cache: { input: GPU_CHECK_INPUTS, output: [] } },
+        'check:gpu:sheets': {
+          command: 'node scripts/check-002/run.mjs sheets',
+          cache: { input: GPU_CHECK_INPUTS, output: [] },
+        },
+        'check:gpu:stability': {
+          command: 'node scripts/check-002/run.mjs stability',
+          cache: { input: GPU_CHECK_INPUTS, output: [] },
         },
       },
     },

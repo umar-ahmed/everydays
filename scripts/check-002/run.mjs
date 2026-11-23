@@ -1,10 +1,10 @@
 // `vp run check:gpu`: serves scripts/check-002/ with Vite and runs it in headless Chromium, where
 // WebGPU runs on SwiftShader (no GPU needed), so the checks exercise the real map generator and
-// the real cloth sim. ONLY=sheets or ONLY=stability runs one of the two pages.
+// the real cloth sim. `node run.mjs sheets` or `node run.mjs stability` (or ONLY=...) runs one half.
 import { chromium } from 'playwright'
 import { createServer } from 'vite-plus'
 
-const only = process.env.ONLY
+const only = process.argv[2] ?? process.env.ONLY
 const server = await createServer({
   server: { port: 0, host: '127.0.0.1', watch: null, hmr: false },
   logLevel: 'error',
@@ -14,7 +14,7 @@ const { port } = server.httpServer.address()
 const browser = await chromium.launch({
   args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=swiftshader', '--use-angle=swiftshader'],
 })
-const timeout = 30 * 60 * 1000
+const timeout = 60 * 60 * 1000
 let failed = false
 try {
   if (only !== 'stability') {

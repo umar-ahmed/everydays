@@ -626,6 +626,7 @@ export class BubbleWrapApp {
       if (armed) ticks = this.readback ? 0 : Math.min(ticks, 1)
       for (let k = 0; k < ticks; k++) this.tick(params.substeps)
     } else this.synth.hiss(0)
+    sim.updateRender(this.renderer)
     this.surface.update(this.renderer)
     // Focus where you look: the pointer's spot on the sheet, else the middle of the view (which
     // follows pan and zoom).

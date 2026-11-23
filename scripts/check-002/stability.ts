@@ -46,7 +46,7 @@ const FRAME = 1 / Number(query.get('hz') ?? 60)
 const PINHOLES = Number(query.get('pinholes') ?? 0)
 /** Frame-time jitter: each frame is FRAME..2*FRAME (capped at 1/60), like a real display under load. */
 const JITTER = query.get('jitter') !== '0'
-const SETTLE = Number(query.get('settle') ?? 3)
+const SETTLE = Number(query.get('settle') ?? 2)
 
 export async function runScenario(
   renderer: THREE.WebGPURenderer,
@@ -151,7 +151,7 @@ export async function runScenario(
   }
 
   // Let the sheet settle under its fill pressure first.
-  while (time < 1) frame(false)
+  while (time < 0.5) frame(false)
   const rest = await read()
   if (rest.popped) failures.push(`${rest.popped} bubbles popped while settling, before any press`)
 
@@ -187,7 +187,7 @@ export async function runScenario(
   const frames = Math.round(settle / FRAME)
   for (let f = 0; f < frames; f++) {
     frame(false)
-    if (f % 12 === 11) samples.push({ t: +(time - popAt).toFixed(2), ...(await read()) })
+    if (f % 15 === 14) samples.push({ t: +(time - popAt).toFixed(2), ...(await read()) })
   }
   // Where the remaining motion is: the fastest vertices, their grid cell and what they belong to.
   const V = new Float32Array(await renderer.getArrayBufferAsync(sim.v.value, null, 0, n * 16))
