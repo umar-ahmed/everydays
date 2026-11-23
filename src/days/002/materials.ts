@@ -71,6 +71,11 @@ export class FilmLook {
   readonly caustics = uniform(1)
   /** Contour spacing for the map view (cm). */
   readonly contour = uniform(0.1)
+  /** Debug map: which quantity (index into DIAG_VIEWS), which correction channel, colour range. */
+  readonly diagKind = uniform(0, 'int')
+  readonly corrKind = uniform(0, 'int')
+  readonly diagLo = uniform(0)
+  readonly diagHi = uniform(1)
 
   readonly film: THREE.MeshPhysicalNodeMaterial
   /** The flat back film's materials, one per view. */
@@ -87,6 +92,8 @@ export class FilmLook {
   readonly normals: THREE.MeshBasicNodeMaterial
   readonly wireframe: THREE.MeshBasicNodeMaterial
   readonly mapView: THREE.MeshBasicNodeMaterial
+  /** Debug maps of the sim state (see DIAG_VIEWS). */
+  readonly diag: THREE.MeshBasicNodeMaterial
 
   /** 1 renders the sheet builder's rest geometry with no sim output (Debug > Simulation). */
   readonly restPose = uniform(0)
@@ -111,6 +118,7 @@ export class FilmLook {
     }
     ;({ normals: this.normals, wireframe: this.wireframe, mapView: this.mapView } = views(cap))
     this.back = { film: this.makeFilm(sim, base), ...views(base) }
+    this.diag = this.makeDiagView(sim, cap)
   }
 
   private live() {
@@ -392,7 +400,131 @@ export class FilmLook {
     view.colorNode = select(texel.w.greaterThan(1.5), vec3(1, 0.1, 0.1), mix(base, vec3(1), rim))
     return view
   }
+
+  /**
+   * Debug maps of the live sim, drawn on the render surface. Per-vertex sim channels are
+   * resampled bilinearly from the containing sim quad in the vertex stage; per-bubble ones
+   * (pressure, volume) come from the bubble under each render vertex.
+   */
+  private makeDiagView(sim: BubbleSim, layer: Layer) {
+    // Data colours: no tone mapping, so the legend matches what is drawn.
+    const view = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide, toneMapped: false })
+    view.positionNode = this.position(layer)
+    const s = this.surface
+    const rx = int(vertexIndex).mod(s.RW)
+    const ry = int(vertexIndex).div(s.RW)
+    const sx = float(rx).div(float(s.detail))
+    const sy = float(ry).div(float(s.detail))
+    const ix = int(floor(sx))
+    const iy = int(floor(sy))
+    const fx = fract(sx)
+    const fy = fract(sy)
+    const imin = (a: Node<'int'>, b: Node<'int'>) => select(a.lessThan(b), a, b)
+    const at = (dx: number, dy: number) =>
+      imin(iy.add(dy), sim.uH.sub(1))
+        .mul(sim.uW)
+        .add(imin(ix.add(dx), sim.uW.sub(1)))
+    const sample = (buf: BubbleSim['diag']) =>
+      mix(
+        mix(buf.element(at(0, 0)), buf.element(at(1, 0)), fx),
+        mix(buf.element(at(0, 1)), buf.element(at(1, 1)), fx),
+        fy,
+      )
+    const diag = sample(sim.diag)
+    const corr = sample(sim.corr)
+    const contact = sample(sim.contact)
+    const info = s.info.element(vertexIndex)
+    const bubble = int(max(info.x, 0))
+    const inBubble = info.x.greaterThanEqual(0)
+    const state = sim.state.element(bubble)
+    const popped = sim.pops.element(bubble).x.greaterThan(0.5)
+    const kind = this.diagKind
+    const correction = select(
+      this.corrKind.equal(0),
+      diag.w,
+      select(
+        this.corrKind.equal(1),
+        corr.x,
+        select(this.corrKind.equal(2), corr.y, select(this.corrKind.equal(3), corr.z, corr.w)),
+      ),
+    )
+    const value = varying(
+      select(
+        kind.equal(0),
+        state.x.div(sim.threshold),
+        select(
+          kind.equal(1),
+          state.y.div(max(sim.pops.element(bubble).w, 1e-6)),
+          select(
+            kind.equal(2),
+            diag.x,
+            select(
+              kind.equal(3),
+              diag.y,
+              select(
+                kind.equal(4),
+                diag.z,
+                select(kind.equal(5), correction, select(kind.equal(6), contact.y, s.pos.element(vertexIndex).w)),
+              ),
+            ),
+          ),
+        ),
+      ),
+    )
+    // 0: flat film where a per-bubble map has nothing to show, 1: popped bubble, 2: cap off the back film.
+    const flag = varying(
+      select(
+        kind.lessThan(2).and(inBubble.not()),
+        float(0),
+        select(
+          kind.lessThan(2).and(popped),
+          float(1),
+          select(kind.equal(6).and(contact.x.lessThan(0.5)), float(2), float(3)),
+        ),
+      ),
+    )
+    const t = clamp(value.sub(this.diagLo).div(max(this.diagHi.sub(this.diagLo), 1e-9)), 0, 1)
+    const sequential = (u: Node<'float'>) =>
+      mix(
+        mix(vec3(0.05, 0.03, 0.16), vec3(0.55, 0.1, 0.45), smoothstep(0, 0.4, u)),
+        mix(vec3(0.98, 0.45, 0.1), vec3(1, 0.95, 0.6), smoothstep(0.7, 1, u)),
+        smoothstep(0.35, 0.75, u),
+      )
+    // Strain diverges around zero: compression blue, tension red.
+    const signed = clamp(value.div(max(max(abs(this.diagLo), abs(this.diagHi)), 1e-9)), -1, 1)
+    const diverging = select(
+      signed.lessThan(0),
+      mix(vec3(0.92), vec3(0.12, 0.35, 1), signed.negate()),
+      mix(vec3(0.92), vec3(1, 0.22, 0.12), signed),
+    )
+    const color = select(kind.equal(2), diverging, sequential(t))
+    // Colours above are sRGB, like the legend; the material writes linear.
+    view.colorNode = pow(
+      select(
+        flag.lessThan(0.5),
+        vec3(0.13),
+        select(flag.lessThan(1.5), vec3(0.85, 0.2, 1), select(flag.lessThan(2.5), vec3(0.2), color)),
+      ),
+      vec3(2.2),
+    )
+    return view
+  }
 }
+
+/** Debug maps, in the order of the diagKind uniform. */
+export const DIAG_VIEWS = [
+  'pressure',
+  'volume ratio',
+  'stretch strain',
+  'bend',
+  'velocity',
+  'correction',
+  'back-film contact',
+  'compression',
+] as const
+export type DiagView = (typeof DIAG_VIEWS)[number]
+/** Solver correction channels for the correction map, in corrKind order. */
+export const CORRECTIONS = ['total', 'stretch', 'bend', 'pressure push', 'table + finger'] as const
 
 type Layer = { pos: RenderSurface['pos']; normal: RenderSurface['normal']; back: boolean }
 

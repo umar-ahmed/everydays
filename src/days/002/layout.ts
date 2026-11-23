@@ -47,6 +47,11 @@ export type LayoutConfig = {
   across: number
   /** Sheet width / depth. */
   aspect: number
+  /**
+   * Extra flat seal film (cm) between the outermost footprints and the sheet edge, on top of
+   * the half-spacing border every bubble already has. 0 is the original, tight edge.
+   */
+  margin?: number
   lattice: Lattice
   budget?: Budget
 }
@@ -63,6 +68,8 @@ export type Layout = {
   pitch: number
   rowStep: number
   rowShift: number
+  /** Flat film from the outermost footprints to the sheet edge (cm), the border plus margin. */
+  border: number
   /** Cloth grid: W x H vertices, h cm apart. */
   W: number
   H: number
@@ -86,12 +93,21 @@ export const fitsCapacity = (W: number, H: number) =>
  * size and spacing in world units. The longer side takes as many whole columns or rows as fit.
  * If the result exceeds the budget or any buffer, the density drops until it fits.
  */
-export function layoutFor({ size, spacing, across, aspect, lattice, budget = FULL_BUDGET }: LayoutConfig): Layout {
+export function layoutFor({
+  size,
+  spacing,
+  across,
+  aspect,
+  lattice,
+  margin = 0,
+  budget = FULL_BUDGET,
+}: LayoutConfig): Layout {
   const pitch = size * (1 + spacing)
   const h = pitch / CELL
   const texel = h / MAP_SCALE
-  // Outermost centers sit half a pitch in from the edge (at least a footprint radius + 2 texels).
-  const edge = Math.max(pitch / 2, size / 2 + 2 * texel)
+  // Outermost centers sit half a pitch in from the edge (at least a footprint radius + 2 texels),
+  // plus the margin.
+  const edge = Math.max(pitch / 2, size / 2 + 2 * texel) + Math.max(margin, 0)
   const rowStep = lattice.rowStep * pitch
   const rowShift = lattice.rowShift * pitch
   const spanX = (cols: number, rows: number) => (cols - 1) * pitch + (rows > 1 ? rowShift : 0) + 2 * edge
@@ -124,6 +140,7 @@ export function layoutFor({ size, spacing, across, aspect, lattice, budget = FUL
       pitch,
       rowStep,
       rowShift,
+      border: edge - size / 2,
       W,
       H,
       h,

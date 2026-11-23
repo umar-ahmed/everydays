@@ -11,11 +11,11 @@ import {
   sheetAspect,
   viewDepth,
 } from './camera.ts'
-import { FilmLook } from './materials.ts'
+import { CORRECTIONS, DIAG_VIEWS, FilmLook, type DiagView } from './materials.ts'
 import { MAX_RENDER_VERTS, RenderSurface, backIndex, renderIndex } from './render.ts'
 import { LatticeGenerator, latticeFor, type Shape, type Tiling } from './generators/lattice.ts'
 import { FULL_BUDGET, PHONE_BUDGET, buildSheetFromMap, layoutFor, type Sheet } from './sheet.ts'
-import { BubbleSim } from './sim.ts'
+import { BubbleSim, FixedStep } from './sim.ts'
 import { StudioPipeline, studioEnvironment } from './studio.ts'
 import { ViewController } from './view.ts'
 
@@ -26,6 +26,8 @@ export type SheetParams = {
   spacing: number
   /** Bubbles along the sheet's shorter side; the longer side follows the viewport. */
   across: number
+  /** Extra flat seal film between the outermost bubbles and the sheet edge (cm). */
+  margin: number
   pinholeChance: number
 }
 
@@ -69,7 +71,17 @@ export type Params = SheetParams & {
   pitch: number
   reducedMotion: boolean
   simulation: 'running' | 'paused' | 'rest pose'
-  view: 'shaded' | 'normals' | 'wireframe' | 'map'
+  view: 'shaded' | 'normals' | 'wireframe' | 'map' | DiagView
+  /** Which solver correction the correction map shows. */
+  corrKind: (typeof CORRECTIONS)[number]
+  /** Debug map colour range: fitted to the current data, or a fixed range per map. */
+  mapRange: 'auto' | 'fixed'
+  /** Sim speed (1 = real time); slow motion runs fewer fixed ticks, never shorter ones. */
+  simSpeed: number
+  /** Pause the sim at the tick of the first pop on a sheet. */
+  freezeOnPop: boolean
+  /** Show the debug HUD (always on for the debug maps). */
+  hud: boolean
   /** Render vertices per sim segment. */
   detail: 1 | 2 | 4
   texture: 'none' | 'grid' | 'dots'
@@ -86,6 +98,34 @@ const TINTS = { clear: '#ffffff', pink: '#ffb0d6', blue: '#a8d0ff' } as const
 
 export type Stats = { popped: number; total: number; viewMoved: boolean }
 
+/** Units and fixed colour ranges of the debug maps. */
+export const DIAG_INFO: Record<DiagView, { units: string; lo: number; hi: number; signed?: boolean }> = {
+  pressure: { units: '× burst threshold (gauge)', lo: 0, hi: 1 },
+  'volume ratio': { units: '× rest volume', lo: 0.5, hi: 1.5 },
+  'stretch strain': { units: 'strain (blue compressed, red stretched)', lo: -0.05, hi: 0.05, signed: true },
+  bend: { units: 'rad from rest angle', lo: 0, hi: 0.5 },
+  velocity: { units: 'cm/s', lo: 0, hi: 20 },
+  correction: { units: 'cm moved by the solver, last substep', lo: 0, hi: 0.005 },
+  'back-film contact': { units: 'cm penetration before the clamp', lo: 0, hi: 0.01 },
+  compression: { units: 'area lost (wrinkle input)', lo: 0, hi: 1 },
+}
+
+export type DebugInfo = {
+  maxSpeed: number
+  maxStrain: number
+  /** Kinetic energy, 1/2 sum |v|^2 h^2 (cm^4/s^2, mass ~ area). */
+  energy: number
+  popsPerSecond: number
+  /** Recent energy samples, oldest first, for the sparkline. */
+  history: number[]
+  legend: { view: DiagView; units: string; lo: number; hi: number; signed: boolean; extra?: string } | null
+  frozen: boolean
+}
+
+export type Hooks = { onDebug?: (d: DebugInfo) => void; onFreeze?: () => void }
+
+const isDiag = (view: Params['view']): view is DiagView => (DIAG_VIEWS as readonly string[]).includes(view)
+
 export async function webgpuAvailable() {
   if (!('gpu' in navigator) || !navigator.gpu) return false
   try {
@@ -101,6 +141,7 @@ const sameSheet = (a: SheetParams, b: SheetParams) =>
   a.size === b.size &&
   a.spacing === b.spacing &&
   a.across === b.across &&
+  a.margin === b.margin &&
   a.pinholeChance === b.pinholeChance
 
 export class BubbleWrapApp {
@@ -161,8 +202,19 @@ export class BubbleWrapApp {
 
   private container: HTMLElement
   private onStats: (s: Stats) => void
+  private hooks: Hooks
+  private clock = new FixedStep()
+  /** Freeze on first pop: armed until the sheet's first pop, then the sim pauses. */
+  private frozeThisSheet = false
+  private frozen = false
+  private lastSimulation: Params['simulation'] = 'running'
+  private debugRead: Promise<void> | null = null
+  private lastDebug = 0
+  private energyHistory: number[] = []
+  private popTimes: number[] = []
 
-  constructor(container: HTMLElement, params: Params, onStats: (s: Stats) => void) {
+  constructor(container: HTMLElement, params: Params, onStats: (s: Stats) => void, hooks: Hooks = {}) {
+    this.hooks = hooks
     this.container = container
     this.onStats = onStats
     this.params = params
@@ -297,6 +349,11 @@ export class BubbleWrapApp {
     look.spot.value.copy(away).multiplyScalar(sheet.domeHeight * 0.55)
     this.configureSurface()
     this.seen = new Uint8Array(sheet.count)
+    this.frozeThisSheet = false
+    this.frozen = false
+    this.popTimes = []
+    this.energyHistory = []
+    this.clock.reset()
     // Rebuilds run inside React's synchronous flush of a dial change; reporting from there nests
     // a state update per slider step and trips React's update-depth limit under rapid input.
     const total = sheet.count
@@ -371,16 +428,33 @@ export class BubbleWrapApp {
     this.synth.pitch = p.pitch
     look.restPose.value = p.simulation === 'rest pose' ? 1 : 0
     this.surface.restPose.value = look.restPose.value
-    if (this.mesh) {
+    // Resuming clears a freeze; re-renders that still say 'running' must not.
+    if (p.simulation === 'running' && this.lastSimulation !== 'running') this.frozen = false
+    this.lastSimulation = p.simulation
+    const diag = isDiag(p.view)
+    this.sim.debug.value = diag || p.hud ? 1 : 0
+    if (diag) {
+      look.diagKind.value = DIAG_VIEWS.indexOf(p.view as DiagView)
+      look.corrKind.value = CORRECTIONS.indexOf(p.corrKind)
+      if (p.mapRange === 'fixed') {
+        look.diagLo.value = DIAG_INFO[p.view as DiagView].lo
+        look.diagHi.value = DIAG_INFO[p.view as DiagView].hi
+      }
+    }
+    // The debug maps hide the back film: between vertices it can poke above a collapsed cap.
+    if (this.backMesh) this.backMesh.visible = !diag
+    if (this.mesh && diag) {
+      this.mesh.material = look.diag
+    } else if (this.mesh && !diag) {
       const views = { shaded: look.film, normals: look.normals, wireframe: look.wireframe, map: look.mapView }
-      this.mesh.material = views[p.view]
+      this.mesh.material = views[p.view as keyof typeof views]
       const backViews = {
         shaded: look.back.film,
         normals: look.back.normals,
         wireframe: look.back.wireframe,
         map: look.back.mapView,
-      }
-      if (this.backMesh) this.backMesh.material = backViews[p.view]
+      } as const
+      if (this.backMesh) this.backMesh.material = backViews[p.view as keyof typeof backViews]
     }
   }
 
@@ -515,15 +589,14 @@ export class BubbleWrapApp {
 
   private frame = () => {
     const now = performance.now()
-    // Capped at 1/60 s: below 60 fps the sheet slows down rather than going soft, since
-    // the solver's stiffness depends on the substep length.
-    const dt = Math.min(Math.max((now - this.last) / 1000, 1 / 240), 1 / 60)
+    // Frame time drives the camera and finger; the sim itself advances in fixed ticks (FixedStep).
+    const dt = Math.min(Math.max((now - this.last) / 1000, 1 / 240), 0.1)
     this.last = now
     this.elapsed += dt
     const { sheet, params, sim } = this
     // Paused and rest pose skip every dispatch and readback. The clock above still ticks
     // each frame, so going back to running starts from a normal-sized step.
-    const live = params.simulation === 'running'
+    const live = params.simulation === 'running' && !this.frozen
 
     const pose = this.placeCamera(this.elapsed, dt)
     this.camera.updateMatrixWorld()
@@ -540,14 +613,19 @@ export class BubbleWrapApp {
     const target = pressing ? bottom + r : sheet.domeHeight + r + 1
     this.fingerY += (target - this.fingerY) * (1 - Math.exp(-dt * (pressing ? 14 : 30)))
     sim.finger.value.set(this.hit.x, this.fingerY, this.hit.z)
-    sim.time.value = this.elapsed
 
     this.ring.visible = onSheet && live && !viewing
     this.ring.position.set(this.hit.x, sheet.domeHeight + 0.04, this.hit.z)
     this.ring.scale.set(params.tool === 'roller' ? sim.rollerHalf.value : r, 1, r)
 
-    if (live) sim.step(this.renderer, dt, params.substeps)
-    else this.synth.hiss(0)
+    if (live) {
+      // Freeze on first pop: one tick at a time, each waiting for the pop readback, so the sim
+      // stops on the tick of the pop.
+      const armed = params.freezeOnPop && !this.frozeThisSheet
+      let ticks = this.clock.ticks(dt, params.simSpeed)
+      if (armed) ticks = this.readback ? 0 : Math.min(ticks, 1)
+      for (let k = 0; k < ticks; k++) this.tick(params.substeps)
+    } else this.synth.hiss(0)
     this.surface.update(this.renderer)
     // Focus where you look: the pointer's spot on the sheet, else the middle of the view (which
     // follows pan and zoom).
@@ -567,6 +645,139 @@ export class BubbleWrapApp {
       this.renderer.render(this.scene, this.camera)
     }
     if (live) this.pollPops()
+    if ((isDiag(params.view) || params.hud) && !this.debugRead && now - this.lastDebug > 160) {
+      this.lastDebug = now
+      this.readDebug()
+    }
+  }
+
+  private simTime = 0
+
+  /** One fixed sim tick (or a single substep of one). */
+  private tick(substeps: number, single = false) {
+    const n = Math.max(1, Math.round(substeps))
+    this.simTime += single ? this.clock.dt / n : this.clock.dt
+    this.sim.time.value = this.simTime
+    this.sim.step(this.renderer, single ? this.clock.dt / n : this.clock.dt, single ? 1 : n)
+  }
+
+  /** Debug > step: advance one frame (tick) or one substep while paused. */
+  stepOnce(kind: 'frame' | 'substep') {
+    if (!this.sheet || (this.params.simulation === 'running' && !this.frozen)) return
+    this.tick(this.params.substeps, kind === 'substep')
+    this.pollPops()
+    this.lastDebug = 0
+  }
+
+  /** HUD numbers and the auto colour range, from a readback of the debug channels (~6 Hz). */
+  private readDebug() {
+    const { sheet, sim, params } = this
+    const n = sheet.W * sheet.H
+    const gen = this.generation
+    const view = isDiag(params.view) ? params.view : null
+    const channel = view === 'back-film contact' ? sim.contact : view === 'correction' ? sim.corr : sim.diag
+    this.debugRead = Promise.all([
+      this.renderer.getArrayBufferAsync(sim.diag.value, null, 0, n * 16),
+      this.renderer.getArrayBufferAsync(channel.value, null, 0, n * 16),
+      this.renderer.getArrayBufferAsync(sim.state.value, null, 0, sheet.count * 16),
+      this.renderer.getArrayBufferAsync(sim.pops.value, null, 0, sheet.count * 16),
+      this.renderer.getArrayBufferAsync(sim.normal.value, null, 0, n * 16),
+    ])
+      .then(([diagBuf, chanBuf, stateBuf, popBuf, normalBuf]) => {
+        if (this.disposed || gen !== this.generation) return
+        const D = new Float32Array(diagBuf)
+        const C = new Float32Array(chanBuf)
+        const S = new Float32Array(stateBuf)
+        const P = new Float32Array(popBuf)
+        const N = new Float32Array(normalBuf)
+        let maxSpeed = 0
+        let maxStrain = 0
+        let energy = 0
+        const mass = sheet.h * sheet.h
+        for (let k = 0; k < n; k++) {
+          const speed = D[k * 4 + 2]
+          maxSpeed = Math.max(maxSpeed, speed)
+          maxStrain = Math.max(maxStrain, Math.abs(D[k * 4]))
+          energy += 0.5 * speed * speed * mass
+        }
+        this.energyHistory.push(energy)
+        if (this.energyHistory.length > 40) this.energyHistory.shift()
+        const t = performance.now()
+        this.popTimes = this.popTimes.filter((p) => t - p < 1000)
+        let legend: DebugInfo['legend'] = null
+        if (view) {
+          const info = DIAG_INFO[view]
+          let lo = info.lo
+          let hi = info.hi
+          let extra: string | undefined
+          if (params.mapRange === 'auto') {
+            // Fit the data: per-bubble maps over intact bubbles, vertex maps over every vertex.
+            const values: number[] = []
+            if (view === 'pressure' || view === 'volume ratio') {
+              for (let b = 0; b < sheet.count; b++) {
+                if (P[b * 4] > 0.5) continue
+                values.push(
+                  view === 'pressure' ? S[b * 4] / sim.threshold.value : S[b * 4 + 1] / Math.max(P[b * 4 + 3], 1e-9),
+                )
+              }
+            } else {
+              const corr = CORRECTIONS.indexOf(params.corrKind)
+              for (let k = 0; k < n; k++) {
+                const v =
+                  view === 'stretch strain'
+                    ? D[k * 4]
+                    : view === 'bend'
+                      ? D[k * 4 + 1]
+                      : view === 'velocity'
+                        ? D[k * 4 + 2]
+                        : view === 'correction'
+                          ? corr === 0
+                            ? D[k * 4 + 3]
+                            : C[k * 4 + corr - 1]
+                          : view === 'back-film contact'
+                            ? C[k * 4 + 1]
+                            : N[k * 4 + 3]
+                values.push(v)
+              }
+            }
+            if (values.length) {
+              lo = Math.min(...values)
+              hi = Math.max(...values)
+              if (info.signed) {
+                const m = Math.max(Math.abs(lo), Math.abs(hi), 1e-6)
+                ;[lo, hi] = [-m, m]
+              } else if (hi - lo < 1e-9) hi = lo + 1e-6
+            }
+            this.look.diagLo.value = lo
+            this.look.diagHi.value = hi
+          }
+          if (view === 'back-film contact') {
+            let touching = 0
+            for (let k = 0; k < n; k++) if (C[k * 4] > 0.5) touching++
+            extra = `${touching} cap vertices clamped`
+          }
+          if (view === 'correction') extra = `channel: ${params.corrKind}`
+          if (view === 'pressure') {
+            let popped = 0
+            for (let b = 0; b < sheet.count; b++) if (P[b * 4] > 0.5) popped++
+            extra = `${popped} popped (magenta)`
+          }
+          legend = { view, units: info.units, lo, hi, signed: !!info.signed, extra }
+        }
+        this.hooks.onDebug?.({
+          maxSpeed,
+          maxStrain,
+          energy,
+          popsPerSecond: this.popTimes.length,
+          history: [...this.energyHistory],
+          legend,
+          frozen: this.frozen,
+        })
+      })
+      .catch(() => {})
+      .finally(() => {
+        this.debugRead = null
+      })
   }
 
   private pollPops() {
@@ -594,11 +805,17 @@ export class BubbleWrapApp {
           if (this.seen[b]) continue
           this.seen[b] = 1
           fresh++
+          this.popTimes.push(performance.now())
           const [x, , , diameter] = sheet.centers.subarray(b * 4, b * 4 + 4)
           this.synth.play({ pressure: pops[b * 4 + 1], size: diameter, pan: x / (sheet.width / 2) })
         }
         this.synth.hiss(Math.sqrt(venting) * 1.4)
         if (fresh) this.onStats({ popped, total, viewMoved: this.viewMoved })
+        if (popped > 0 && this.params.freezeOnPop && !this.frozeThisSheet) {
+          this.frozeThisSheet = true
+          this.frozen = true
+          this.hooks.onFreeze?.()
+        }
       })
       .catch(() => {})
       .finally(() => {

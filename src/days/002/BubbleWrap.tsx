@@ -1,7 +1,8 @@
 import { DialRoot, useDialKitController, type DialConfig } from 'dialkit'
 import { useReducedMotion } from 'motion/react'
 import { useEffect, useRef, useState } from 'react'
-import { BubbleWrapApp, webgpuAvailable, type Params, type Stats } from './app.ts'
+import { BubbleWrapApp, webgpuAvailable, type DebugInfo, type Params, type Stats } from './app.ts'
+import { CORRECTIONS, DIAG_VIEWS } from './materials.ts'
 import { SHAPES, TILINGS, type Shape, type Tiling } from './generators/lattice.ts'
 
 const MODES = ['press', 'view'] as const
@@ -16,6 +17,8 @@ const dialConfig = {
     spacing: [0.28, 0.1, 1, 0.01],
     // Bubbles along the shorter side; the longer side fills the screen.
     'bubbles across': [8, 3, 16, 1],
+    // Extra flat seal film between the outermost bubbles and the sheet edge (cm).
+    'edge margin': [0.4, 0, 2, 0.05],
     'pinhole chance': [0.06, 0, 0.5, 0.01],
   },
   physics: {
@@ -74,7 +77,18 @@ const dialConfig = {
   debug: {
     _collapsed: true,
     simulation: { type: 'select', options: ['running', 'paused', 'rest pose'], default: 'running' },
-    'debug view': { type: 'select', options: ['shaded', 'normals', 'wireframe', 'map'], default: 'shaded' },
+    'debug view': {
+      type: 'select',
+      options: ['shaded', 'normals', 'wireframe', 'map', ...DIAG_VIEWS],
+      default: 'shaded',
+    },
+    'correction type': { type: 'select', options: [...CORRECTIONS], default: 'total' },
+    'map range': { type: 'select', options: ['auto', 'fixed'], default: 'auto' },
+    'show hud': false,
+    'sim speed': [1, 0.1, 1, 0.05],
+    'freeze on first pop': false,
+    'step frame': { type: 'action' },
+    'step substep': { type: 'action' },
   },
   reset: { type: 'action' },
   'reset view': { type: 'action' },
@@ -99,6 +113,7 @@ export function BubbleWrap() {
     size: v.sheet['bubble size'],
     spacing: v.sheet.spacing,
     across: v.sheet['bubbles across'],
+    margin: v.sheet['edge margin'],
     pinholeChance: v.sheet['pinhole chance'],
     fill: v.physics['fill pressure'],
     threshold: v.physics['burst threshold'],
@@ -134,6 +149,11 @@ export function BubbleWrap() {
     reducedMotion,
     simulation: v.debug.simulation as Params['simulation'],
     view: v.debug['debug view'] as Params['view'],
+    corrKind: v.debug['correction type'] as Params['corrKind'],
+    mapRange: v.debug['map range'] as Params['mapRange'],
+    hud: v.debug['show hud'],
+    simSpeed: v.debug['sim speed'],
+    freezeOnPop: v.debug['freeze on first pop'],
     detail: parseInt(v.look['render detail']) as Params['detail'],
     texture: v.look.texture as Params['texture'],
     textureScale: v.look['texture scale'],
@@ -149,6 +169,8 @@ export function BubbleWrap() {
   const appRef = useRef<BubbleWrapApp | null>(null)
   const [status, setStatus] = useState<Status>('loading')
   const [stats, setStats] = useState<Stats>({ popped: 0, total: 0, viewMoved: false })
+  const [debug, setDebug] = useState<DebugInfo | null>(null)
+  const freezeRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     let app: BubbleWrapApp | null = null
@@ -165,7 +187,10 @@ export function BubbleWrap() {
         setStats((prev) =>
           prev.popped === s.popped && prev.total === s.total && prev.viewMoved === s.viewMoved ? prev : s,
         )
-      app = new BubbleWrapApp(container.current, paramsRef.current, onStats)
+      app = new BubbleWrapApp(container.current, paramsRef.current, onStats, {
+        onDebug: setDebug,
+        onFreeze: () => freezeRef.current(),
+      })
       try {
         await app.init()
       } catch {
@@ -198,6 +223,11 @@ export function BubbleWrap() {
     actionRef.current = (path) => {
       if (path === 'reset') appRef.current?.reset()
       if (path === 'reset view') appRef.current?.resetView()
+      if (path === 'debug.step frame') appRef.current?.stepOnce('frame')
+      if (path === 'debug.step substep') appRef.current?.stepOnce('substep')
+    }
+    freezeRef.current = () => {
+      dial.setValue('debug.simulation', 'paused')
     }
     const typing = (e: KeyboardEvent) =>
       e.target instanceof HTMLInputElement ||
@@ -259,6 +289,10 @@ export function BubbleWrap() {
               </p>
             </div>
           </div>
+        )}
+
+        {status === 'running' && debug && (params.hud || params.view !== 'shaded') && (
+          <DebugOverlay debug={debug} showLegend={!!debug.legend && params.view === debug.legend.view} />
         )}
 
         <div
@@ -324,5 +358,60 @@ export function BubbleWrap() {
         productionEnabled
       />
     </>
+  )
+}
+
+/** HUD (top left, under the title) and the colour legend of the active debug map. */
+function DebugOverlay({ debug, showLegend }: { debug: DebugInfo; showLegend: boolean }) {
+  const { history } = debug
+  const peak = Math.max(...history, 1e-12)
+  const points = history
+    .map((e, i) => `${(i / Math.max(history.length - 1, 1)) * 120},${28 - (e / peak) * 26}`)
+    .join(' ')
+  const legend = debug.legend
+  const fmt = (x: number) => (Math.abs(x) >= 100 || (Math.abs(x) < 0.01 && x !== 0) ? x.toExponential(1) : x.toFixed(3))
+  const ramp = legend?.signed
+    ? 'linear-gradient(90deg, rgb(31,89,255), rgb(235,235,235), rgb(255,56,31))'
+    : 'linear-gradient(90deg, rgb(13,8,41), rgb(140,26,115), rgb(250,115,26), rgb(255,242,153))'
+  return (
+    <div
+      data-chrome
+      className="pointer-events-none absolute top-12 left-4 w-[200px] rounded-lg border border-white/10 bg-black/60 p-2.5 font-mono text-[10px] leading-4 text-white/75 backdrop-blur lg:top-4"
+    >
+      <div className="flex justify-between">
+        <span className="text-white/45">max |v|</span>
+        <span>{debug.maxSpeed.toFixed(2)} cm/s</span>
+      </div>
+      <div className="flex justify-between">
+        <span className="text-white/45">max strain</span>
+        <span>{(debug.maxStrain * 100).toFixed(2)} %</span>
+      </div>
+      <div className="flex justify-between">
+        <span className="text-white/45">kinetic energy</span>
+        <span>{debug.energy.toExponential(2)}</span>
+      </div>
+      <div className="flex justify-between">
+        <span className="text-white/45">pops / s</span>
+        <span>{debug.popsPerSecond}</span>
+      </div>
+      <svg viewBox="0 0 120 30" className="mt-1 h-[30px] w-full" aria-label="kinetic energy, last few seconds">
+        <polyline points={points} fill="none" stroke="rgb(250,170,60)" strokeWidth="1.2" />
+      </svg>
+      <div className="text-white/35">energy, last ~6 s (peak {peak.toExponential(1)})</div>
+      {debug.frozen && <div className="mt-1 text-[rgb(250,170,60)]">frozen on first pop</div>}
+      {showLegend && legend && (
+        <div className="mt-2 border-t border-white/10 pt-2">
+          <div className="text-white/90">{legend.view}</div>
+          <div className="mt-1 h-2 rounded-sm" style={{ background: ramp }} />
+          <div className="mt-0.5 flex justify-between">
+            <span>{fmt(legend.lo)}</span>
+            {legend.signed && <span>0</span>}
+            <span>{fmt(legend.hi)}</span>
+          </div>
+          <div className="text-white/45">{legend.units}</div>
+          {legend.extra && <div className="text-white/45">{legend.extra}</div>}
+        </div>
+      )}
+    </div>
   )
 }
