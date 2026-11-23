@@ -29,3 +29,9 @@ release. Add a tool name to select part of the graph. For example, run
 - [ ] If setup, runtime, or package-manager behavior looks wrong, run `vp env doctor` and include its output when asking for help.
 
 <!--VITE PLUS END-->
+
+## Project checks
+
+- `vp run check:gpu:sheets`: day 002 bubble-map, sheet and camera checks in headless Chromium (SwiftShader WebGPU). Cached; runs in CI.
+- `vp run check:stability`: day 002 pop-stability regression (presses one bubble in 12 scenarios and asserts nothing else pops and the sheet settles). Opt-in and local only: it takes ~10 min locally and ~30 min on CI, so it is deliberately not in the Pages workflow. Run it after changing `src/days/002/sim.ts`.
+- `vp run check:gpu` runs both.

@@ -119,14 +119,14 @@ export default defineConfig(({ mode }) => {
       tasks: {
         // Headless Chromium + SwiftShader WebGPU validation of day 002: the bubble map, sheet and
         // camera invariants (sheets) and single-pop stability of the real cloth sim (stability).
-        // Slow (minutes), so each half is cached on exactly what it exercises; CI runs the halves
-        // as parallel jobs.
+        // Slow (minutes), so each half is cached on exactly what it exercises. CI runs only the
+        // sheet checks; the stability half (~30 min on CI) is opt-in: `vp run check:stability`.
         'check:gpu': { command: 'node scripts/check-002/run.mjs', cache: { input: GPU_CHECK_INPUTS, output: [] } },
         'check:gpu:sheets': {
           command: 'node scripts/check-002/run.mjs sheets',
           cache: { input: GPU_CHECK_INPUTS, output: [] },
         },
-        'check:gpu:stability': {
+        'check:stability': {
           command: 'node scripts/check-002/run.mjs stability',
           cache: { input: GPU_CHECK_INPUTS, output: [] },
         },
