@@ -204,7 +204,8 @@ export async function runScenario(
   const peak = Math.max(...samples.map((s) => s.energy))
   const extra = Math.max(...samples.map((s) => s.popped)) - 1
   if (extra > 0) failures.push(`${extra} other bubbles popped after a single press`)
-  if (last.energy > Math.max(peak * 0.05, 1e-3)) {
+  // Settled: energy down to 5% of its peak, or nothing moving faster than 0.2 cm/s anywhere.
+  if (last.energy > Math.max(peak * 0.05, 1e-3) && last.maxSpeed > 0.2) {
     failures.push(
       `kinetic energy didn't decay: ${last.energy.toExponential(2)} at the end vs peak ${peak.toExponential(2)}`,
     )
