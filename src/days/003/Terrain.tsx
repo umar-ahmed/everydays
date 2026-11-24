@@ -24,6 +24,13 @@ const dialConfig = {
   },
   look: {
     palette: { type: 'select', options: [...PALETTE_NAMES], default: 'alpine' },
+    // Eroded soil and rock carry their colour downhill into streaks, scree and fans.
+    'color transport': true,
+    // Thickness of the loose top layer colours mix into (cells on the 512 grid): thin shows
+    // every new deposit, thick blends them into broad fans.
+    'mixing layer': [0.5, 0.05, 3, 0.05],
+    // Strata contrast and saturation of the moved colour, so it reads.
+    vividness: [0.5, 0, 1, 0.01],
   },
   snow: {
     // Fraction of the peak height; picking a palette resets it to that palette's line.
@@ -57,7 +64,7 @@ const dialConfig = {
     joints: [0.4, 0, 1, 0.01],
   },
   view: {
-    'debug view': { type: 'select', options: ['shaded', 'water', 'erosion', 'hardness'], default: 'shaded' },
+    'debug view': { type: 'select', options: ['shaded', 'water', 'erosion', 'hardness', 'color'], default: 'shaded' },
   },
   reset: { type: 'action' },
   'new seed': { type: 'action' },
@@ -84,6 +91,9 @@ export function Terrain() {
     strataScale: v.rock['strata scale'],
     strataTilt: v.rock['strata tilt'],
     joints: v.rock.joints,
+    layer: v.look['mixing layer'],
+    colorTransport: v.look['color transport'],
+    vividness: v.look.vividness,
     capacity: v.erosion.capacity,
     erosion: v.erosion['erosion rate'],
     deposition: v.erosion['deposition rate'],

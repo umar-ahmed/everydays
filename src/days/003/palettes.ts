@@ -160,6 +160,9 @@ export class Look {
   readonly snowSlope = uniform(Math.cos((55 * Math.PI) / 180))
   readonly snowAspect = uniform(0.3)
   readonly sparkle = uniform(0.5)
+  /** Colour transport shown (0/1), and its vividness boost. */
+  readonly colorOn = uniform(1)
+  readonly vivid = uniform(0.5)
 
   setPalette(p: Palette) {
     p.ramp.forEach((c, k) => this.ramp[k].value.copy(v3(c)))

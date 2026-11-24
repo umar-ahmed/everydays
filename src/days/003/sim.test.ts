@@ -14,6 +14,7 @@ const erosion: ErosionParams = {
   strataScale: 0.3,
   strataTilt: 12,
   joints: 0.4,
+  layer: 0.5,
 }
 
 describe('ErosionSim', () => {
@@ -27,6 +28,7 @@ describe('ErosionSim', () => {
     expect(sim.state.value.array.length).toBe(64 * 64 * 4)
     // All buffers start from one shared zeroed upload array.
     expect(sim.rock.value.array).toBe(sim.state.value.array)
+    expect(sim.surface.value.array.length).toBe(64 * 64)
   })
 
   it('scales the erosion that is measured in cells with the resolution', () => {
@@ -36,6 +38,7 @@ describe('ErosionSim', () => {
     fine.setErosion(erosion)
     expect(fine.rain.value / coarse.rain.value).toBeCloseTo(1023 / 127)
     expect(fine.capacity.value).toBe(coarse.capacity.value)
+    expect(fine.layer.value / coarse.layer.value).toBeCloseTo(1023 / 127)
     // Strata are a world-space thickness, so a finer grid needs more cells of height per band.
     expect(coarse.strataK.value / fine.strataK.value).toBeCloseTo(1023 / 127)
     // Same world height in both: the fine grid counts more cells.
@@ -46,7 +49,8 @@ describe('ErosionSim', () => {
 
   it('falls back to the largest grid whose buffers fit the device limits', () => {
     expect(bufferBytes(4096)).toBe(256 * 1024 ** 2)
-    expect(simBytes(4096)).toBe(1.5 * 1024 ** 3)
+    // Six f32 vec4 buffers plus four of packed rgba8 colour.
+    expect(simBytes(4096)).toBe(1.75 * 1024 ** 3)
     // WebGPU's default limits: 256 MB buffers, 128 MB storage bindings.
     const defaults = { maxBufferSize: 256 * 1024 ** 2, maxStorageBufferBindingSize: 128 * 1024 ** 2 }
     expect(fitResolution(4096, defaults)).toBe(2048)

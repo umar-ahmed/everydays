@@ -10,17 +10,20 @@ import {
   instanceIndex,
   instancedArray,
   int,
+  uint,
   length,
   max,
   min,
   mix,
   mx_noise_float,
+  packUnorm4x8,
   pow,
   select,
   sin,
   smoothstep,
   sqrt,
   tan,
+  unpackUnorm4x8,
   uniform,
   vec2,
   vec3,
@@ -76,6 +79,8 @@ export type ErosionParams = {
   strataTilt: number
   /** Strength of the weak fault/joint lines. */
   joints: number
+  /** Thickness of the mobile top layer whose colour moves with the sediment (cells, 512 grid). */
+  layer: number
 }
 
 /** World size of the terrain square. */
@@ -85,10 +90,11 @@ export const SIZE = 10
 export const RESOLUTIONS = [128, 256, 512, 1024, 2048, 4096] as const
 export const defaultResolution = (compact: boolean) => (compact ? 256 : 512)
 
-/** GPU buffers the sim allocates, each n * n vec4s of f32. */
+/** GPU buffers the sim allocates: n * n vec4s of f32 each, plus four of packed rgba8 colour. */
 export const SIM_BUFFERS = 6
+export const COLOR_BUFFERS = 4
 export const bufferBytes = (n: number) => n * n * 16
-export const simBytes = (n: number) => SIM_BUFFERS * bufferBytes(n)
+export const simBytes = (n: number) => SIM_BUFFERS * bufferBytes(n) + COLOR_BUFFERS * n * n * 4
 
 /** Largest resolution up to `requested` whose buffers fit the device's limits. */
 export function fitResolution(
@@ -103,6 +109,7 @@ export function fitResolution(
 type I = Node<'int'>
 type F = Node<'float'>
 type V4 = Node<'vec4'>
+type U = Node<'uint'>
 
 const RAD = Math.PI / 180
 
@@ -119,6 +126,15 @@ const RAD = Math.PI / 180
  *
  * The rock is layered: tilted hard and soft strata (looked up at the current surface height, so
  * cutting down through them makes benches and steps), blocky 3D noise, and weak joint lines.
+ *
+ * Colour moves with the material. Each cell has a mobile top layer (up to `layer` cells thick)
+ * whose material is tracked as (relief it came from, stratum 0 soft..1 hard, rockiness), with the
+ * layer's cover 0..1 in the fourth channel; below it is bedrock, whose material is wherever the
+ * surface is now. Eroded material carries its source's mix into the suspended sediment, which is
+ * advected with the water and blended into the layer where it settles; thermal slumping carries
+ * it downhill the same way. The renderer maps materials through the palette, so presets still
+ * swap live. Materials are packed rgba8 with stochastic rounding, so small mixing steps add up
+ * instead of rounding away.
  */
 export class ErosionSim {
   readonly n: number
@@ -137,6 +153,12 @@ export class ErosionSim {
   readonly velocity: StorageBufferNode<'vec4'>
   /** Per cell: rock noise, joint line (0..1), talus noise, current rain factor. */
   readonly rock: StorageBufferNode<'vec4'>
+  /** Top-layer material and cover, packed rgba8 (see above); thermal writes `surface2`. */
+  readonly surface: StorageBufferNode<'uint'>
+  readonly surface2: StorageBufferNode<'uint'>
+  /** Suspended sediment's material: erosion writes `sedColor`, transport `sedColor2`. */
+  readonly sedColor: StorageBufferNode<'uint'>
+  readonly sedColor2: StorageBufferNode<'uint'>
 
   readonly seed = uniform(1)
   readonly octaves = uniform(7)
@@ -158,11 +180,14 @@ export class ErosionSim {
   readonly strataTan = uniform(0.2)
   readonly strataDir = uniform(new THREE.Vector2(1, 0))
   readonly joints = uniform(0.4)
+  /** Top-layer thickness in cells. */
+  readonly layer = uniform(0.5)
   readonly dt = uniform(0.02)
   /** Erosion steps run so far (wraps), for the drifting weather. */
   readonly step = uniform(0)
 
   private readonly generate: ComputeNode
+  private readonly paint: ComputeNode
   private readonly weather: ComputeNode
   private readonly kernels: ComputeNode[]
 
@@ -182,7 +207,13 @@ export class ErosionSim {
     this.flux2 = buffer()
     this.velocity = buffer()
     this.rock = buffer()
-    const { state, state2, flux, flux2, velocity, rock } = this
+    const words = new Uint32Array(zeros.buffer, 0, count)
+    const packed = () => instancedArray(words, 'uint') as StorageBufferNode<'uint'>
+    this.surface = packed()
+    this.surface2 = packed()
+    this.sedColor = packed()
+    this.sedColor2 = packed()
+    const { state, state2, flux, flux2, velocity, rock, surface, surface2, sedColor, sedColor2 } = this
     const N = int(n)
 
     const xy = (i: I) => [i.mod(N), i.div(N)] as const
@@ -192,6 +223,32 @@ export class ErosionSim {
     const inside = (jx: I, jy: I) =>
       jx.greaterThanEqual(0).and(jx.lessThan(N)).and(jy.greaterThanEqual(0)).and(jy.lessThan(N))
     const offset = vec3(this.seed.mul(17.13), this.seed.mul(-9.71), this.seed.mul(3.37))
+    /** Per-cell, per-step dither in [0, 1) (salted per kernel) for stochastic rounding. */
+    const dither = (x: I, y: I, salt: number) =>
+      hash(
+        vec2(
+          float(x).add(this.step.mul(0.618)).add(salt),
+          float(y)
+            .add(this.step.mul(1.37))
+            .sub(salt * 0.7),
+        ),
+      )
+    /** Quantize to rgba8 rounding up or down at random in proportion, so the mean is exact. */
+    const pack = (v: V4, d: F) =>
+      packUnorm4x8(
+        min(
+          floor(
+            clamp(v, 0, 1)
+              .mul(255)
+              .add(vec4(d, fract(d.add(0.38)), fract(d.add(0.62)), fract(d.add(0.81)))),
+          ),
+          255,
+        ).div(255),
+      )
+    const unpack = (u: U) => unpackUnorm4x8(u) as unknown as V4
+    /** Bedrock's material where the surface is now: its relief, stratum, and rockiness. */
+    const bedrock = (h: F, band: F, rocky: F) =>
+      vec3(clamp(h.div(this.heightCells), 0, 1), band.mul(0.5).add(0.5), rocky)
 
     // Terrain: fBm and ridged noise mixed by the Ridge dial, sharpened, with the edges lowered
     // so rivers drain off the map instead of pooling at the border. Also lays down the rock.
@@ -264,6 +321,16 @@ export class ErosionSim {
       flux2.element(i).assign(vec4(0))
       velocity.element(i).assign(vec4(0))
       rock.element(i).assign(vec4(blocks, joint, talusNoise, 1))
+    })().compute(count)
+
+    // A fresh map has no loose top layer and nothing in suspension. (A separate kernel: one
+    // shader may only bind eight storage buffers by default.)
+    this.paint = Fn(() => {
+      const i = int(instanceIndex)
+      surface.element(i).assign(uint(0))
+      surface2.element(i).assign(uint(0))
+      sedColor.element(i).assign(uint(0))
+      sedColor2.element(i).assign(uint(0))
     })().compute(count)
 
     // Weather, once per batch of steps: storm cells drift across the map and change shape, so
@@ -387,7 +454,8 @@ export class ErosionSim {
       const banks = hl.add(hr).add(ht).add(hb).mul(0.15).add(htl.add(htr).add(hbl).add(hbr).mul(0.1))
       const incised = clamp(float(1).sub(banks.sub(s.x).div(MAX_INCISION * scale)), 0, 1)
       const r = rock.element(i)
-      const logHardness = this.hardnessLog(float(x), float(y), s.x, r)
+      const band = this.strataBand(float(x), float(y), s.x, r)
+      const logHardness = this.hardnessFrom(band, r)
       const hardness = exp(logHardness)
       const take = this.erosion.mul(capacity.sub(s.z)).mul(this.dt).mul(incised).div(hardness)
       const drop = this.deposition.mul(s.z.sub(capacity)).mul(this.dt)
@@ -397,6 +465,29 @@ export class ErosionSim {
       state2.element(i).assign(vec4(s.x.add(dh), s.y, s.z.sub(dh), s.w))
       // Each cell's talus angle, for the thermal pass to read for itself and its neighbours.
       velocity.element(i).assign(vec4(v.xyz, talusOf(r, logHardness, s.x, s.w)))
+
+      // Colour: what's cut comes off the loose layer first, then the bedrock under it, and
+      // mixes into the suspended load by mass; what settles mixes into the layer by mass.
+      const top = this.layer
+      const layer = unpack(surface.element(i))
+      const load = unpack(sedColor2.element(i)).xyz
+      const layerMass = layer.w.mul(top)
+      const cut = max(dh.negate(), 0)
+      const settled = max(dh, 0)
+      const fromLayer = min(cut, layerMass)
+      const rocky = smoothstep(0.51, 0.8, tilt)
+      const picked = layer.xyz.mul(fromLayer).add(bedrock(s.x, band, rocky).mul(cut.sub(fromLayer)))
+      const loadMass = s.z.add(cut)
+      const newLoad = select(loadMass.greaterThan(1e-6), load.mul(s.z).add(picked).div(max(loadMass, 1e-6)), load)
+      const kept = layerMass.sub(fromLayer)
+      const mass = kept.add(settled)
+      const newLayer = select(
+        mass.greaterThan(1e-6),
+        layer.xyz.mul(kept).add(load.mul(settled)).div(max(mass, 1e-6)),
+        layer.xyz,
+      )
+      surface.element(i).assign(pack(vec4(newLayer, min(mass.div(top), 1)), dither(x, y, 0.13)))
+      sedColor.element(i).assign(pack(vec4(newLoad, 0), dither(x, y, 0.29)))
     })().compute(count)
 
     // 4. Carry sediment along the flow (semi-Lagrangian), and evaporate.
@@ -416,6 +507,22 @@ export class ErosionSim {
       const carried = mix(mix(sed(0, 0), sed(1, 0), tx), mix(sed(0, 1), sed(1, 1), tx), ty)
       const water = s.y.mul(max(float(1).sub(this.evaporation.mul(this.dt)), 0))
       state.element(i).assign(vec4(s.x, water, carried, s.w))
+      // The load's material comes along with it, weighted by how much each corner carries.
+      const tint = vec3(0).toVar()
+      const weight = float(0).toVar()
+      for (const [dx, dy, w] of [
+        [0, 0, float(1).sub(tx).mul(float(1).sub(ty))],
+        [1, 0, tx.mul(float(1).sub(ty))],
+        [0, 1, float(1).sub(tx).mul(ty)],
+        [1, 1, tx.mul(ty)],
+      ] as const) {
+        const m = w.mul(sed(dx, dy))
+        tint.addAssign(unpack(sedColor.element(idx(x0.add(dx), y0.add(dy)))).xyz.mul(m))
+        weight.addAssign(m)
+      }
+      const own = unpack(sedColor.element(i)).xyz
+      const moved = select(weight.greaterThan(1e-6), tint.div(max(weight, 1e-6)), own)
+      sedColor2.element(i).assign(pack(vec4(moved, 0), dither(x, y, 0.47)))
     })().compute(count)
 
     // 5. Thermal weathering: material slides to lower neighbours (all eight) where the slope
@@ -428,6 +535,13 @@ export class ErosionSim {
       const s = state.element(i)
       const own = velocity.element(i).w
       const net = float(0).toVar()
+      // Colour: what slides in brings the source's loose layer first, then its bedrock (a
+      // slide only starts on ground steeper than talus, so that bedrock counts as rock).
+      const top = this.layer
+      const layer = unpack(surface.element(i))
+      const gone = float(0).toVar()
+      const came = float(0).toVar()
+      const brought = vec3(0).toVar()
       for (const [dx, dy] of [
         [-1, 0],
         [1, 0],
@@ -450,14 +564,28 @@ export class ErosionSim {
           .mul(this.thermal)
           .mul(0.1 / dist)
         net.addAssign(select(diff.greaterThan(0), slide.negate(), slide))
+        const incoming = select(diff.greaterThan(0), float(0), slide)
+        gone.addAssign(select(diff.greaterThan(0), slide, float(0)))
+        const source = unpack(surface.element(j))
+        const jx = float(x.add(dx))
+        const jy = float(y.add(dy))
+        const rockThere = bedrock(nb.x, this.strataBand(jx, jy, nb.x, rock.element(j)), float(1))
+        const fromLayer = clamp(source.w.mul(top).div(max(incoming, 1e-6)), 0, 1)
+        brought.addAssign(mix(rockThere, source.xyz, fromLayer).mul(incoming))
+        came.addAssign(incoming)
       }
       state2.element(i).assign(vec4(s.x.add(net), s.y, s.z, s.w))
+      const kept = max(layer.w.mul(top).sub(gone), 0)
+      const mass = kept.add(came)
+      const mixed = select(mass.greaterThan(1e-6), layer.xyz.mul(kept).add(brought).div(max(mass, 1e-6)), layer.xyz)
+      surface2.element(i).assign(pack(vec4(mixed, min(mass.div(top), 1)), dither(x, y, 0.71)))
     })().compute(count)
 
     // Thermal writes state2; copy back so every step starts from state.
     const copyBack = Fn(() => {
       const i = int(instanceIndex)
       state.element(i).assign(state2.element(i))
+      surface.element(i).assign(surface2.element(i))
     })().compute(count)
 
     this.kernels = [fluxPass, waterPass, erodePass, transportPass, thermalPass, copyBack]
@@ -469,12 +597,12 @@ export class ErosionSim {
    * lines that are weaker than anything around them. Erosion divides by exp() of this.
    */
   hardnessLog(x: F, y: F, h: F, r: V4) {
-    return this.strataBand(x, y, h, r)
-      .mul(0.9)
-      .add(r.x.mul(0.6))
-      .sub(r.y.mul(this.joints).mul(1.6))
-      .mul(this.hardness)
-      .mul(1.2)
+    return this.hardnessFrom(this.strataBand(x, y, h, r), r)
+  }
+
+  /** `hardnessLog` from an already looked-up strata band. */
+  hardnessFrom(band: F, r: V4) {
+    return band.mul(0.9).add(r.x.mul(0.6)).sub(r.y.mul(this.joints).mul(1.6)).mul(this.hardness).mul(1.2)
   }
 
   /** -1 soft to 1 hard: which stratum the point at height h (cells) sits in. */
@@ -506,11 +634,12 @@ export class ErosionSim {
     this.strataK.value = (2 * Math.PI * this.cell) / Math.max(p.strataScale, 1e-3)
     this.strataTan.value = Math.tan(p.strataTilt * RAD)
     this.joints.value = p.joints
+    this.layer.value = p.layer * this.scale
   }
 
   /** Fresh terrain from the noise, dry, with nothing eroded. */
   reset(renderer: WebGPURenderer) {
-    void renderer.compute(this.generate)
+    void renderer.compute([this.generate, this.paint])
   }
 
   /** Run `iterations` erosion steps in one submission. */
@@ -523,7 +652,8 @@ export class ErosionSim {
 
   /** Free the GPU buffers and compute pipelines. */
   dispose() {
-    for (const node of [this.generate, this.weather, ...this.kernels]) node.dispose()
+    for (const node of [this.generate, this.paint, this.weather, ...this.kernels]) node.dispose()
     for (const b of [this.state, this.state2, this.flux, this.flux2, this.velocity, this.rock]) b.value.dispose()
+    for (const b of [this.surface, this.surface2, this.sedColor, this.sedColor2]) b.value.dispose()
   }
 }

@@ -19,6 +19,7 @@ import {
   select,
   smoothstep,
   transformNormalToView,
+  unpackUnorm4x8,
   uniform,
   vec3,
   vertexIndex,
@@ -43,7 +44,11 @@ export type Params = TerrainParams &
   ErosionParams & {
     eroding: boolean
     iterations: number
-    view: 'shaded' | 'water' | 'erosion' | 'hardness'
+    view: 'shaded' | 'water' | 'erosion' | 'hardness' | 'color'
+    /** Show the colour the erosion has moved (it is tracked either way). */
+    colorTransport: boolean
+    /** Strata contrast and saturation boost for the moved colour, 0..1. */
+    vividness: number
     /** Cells per side of the heightfield. */
     resolution: number
     palette: PaletteName
@@ -344,6 +349,16 @@ export class TerrainApp {
         .add(iclamp(int(floor(c.x.add(0.5))))),
     )
     const stratum = sim.strataBand(c.x, c.y, height, near)
+    // The loose top layer the erosion moves around, bilinear like the rest.
+    const layerAt = (x: I, y: I) =>
+      unpackUnorm4x8(sim.surface.element(iclamp(y).mul(N).add(iclamp(x)))) as unknown as Node<'vec4'>
+    const lx = int(floor(c.x))
+    const ly = int(floor(c.y))
+    const layer = mix(
+      mix(layerAt(lx, ly), layerAt(lx.add(1), ly), fract(c.x)),
+      mix(layerAt(lx, ly.add(1)), layerAt(lx.add(1), ly.add(1)), fract(c.x)),
+      fract(c.y),
+    )
     const hardness = sim.hardnessLog(c.x, c.y, height, near)
 
     const { look } = this
@@ -353,22 +368,41 @@ export class TerrainApp {
     const relief = height.div(max(sim.heightCells, 1))
     const t = clamp(relief, 0, 1)
     // Height ramp for gentle ground: four stops at 0, 0.3, 0.6 and 1 of the peak height.
-    const ramp = mix(
-      mix(mix(look.ramp[0], look.ramp[1], smoothstep(0, 0.3, t)), look.ramp[2], smoothstep(0.3, 0.6, t)),
-      look.ramp[3],
-      smoothstep(0.6, 1, t),
-    )
+    const rampAt = (u: F) =>
+      mix(
+        mix(mix(look.ramp[0], look.ramp[1], smoothstep(0, 0.3, u)), look.ramp[2], smoothstep(0.3, 0.6, u)),
+        look.ramp[3],
+        smoothstep(0.6, 1, u),
+      )
+    const ramp = rampAt(t)
+    // Rock by stratum (0 soft, 1 hard): hard bands paler, soft darker, and with Vividness the
+    // soft ones also take the cut-rock hue, so strata read as coloured bands.
+    const rockOf = (st: F) =>
+      mix(look.rock, mix(look.rockCut, look.rock, st), look.vivid).add(
+        st
+          .mul(2)
+          .sub(1)
+          .mul(0.5)
+          .mul(look.strata.add(look.vivid.mul(look.colorOn).mul(0.2))),
+      )
     // Contour lines every 5% of the peak height, antialiased in screen space.
     const iso = relief.mul(20)
     const isoDist = min(fract(iso), float(1).sub(fract(iso))).div(max(fwidth(iso), 1e-4))
     const ground = ramp.mul(float(1).sub(look.contours.mul(float(1).sub(clamp(isoDist, 0, 1)))))
-    // Exposed rock shows the same strata the erosion cuts through: hard bands paler, soft
-    // darker, warmer where the water cut through them.
-    const band = stratum.mul(0.5).mul(look.strata)
-    const rock = mix(look.rock, look.rockCut, smoothstep(-0.3, -3, change)).add(band.mul(steep))
+    // Exposed rock shows the same strata the erosion cuts through, warmer where the water cut
+    // through them.
+    const rock = mix(rockOf(stratum.mul(0.5).add(0.5)), look.rockCut, smoothstep(-0.3, -3, change).mul(0.6))
     const deposited = smoothstep(0.02, 0.35, change)
     let albedo = mix(ground, rock, steep.mul(look.rockiness))
-    albedo = mix(albedo, look.sand, deposited.mul(float(1).sub(steep.mul(0.7))))
+    // Moved material, mapped through the same palette from where it came from (its relief,
+    // stratum and rockiness), then pushed apart in saturation so streaks and fans read.
+    const moved = mix(rampAt(layer.x), rockOf(layer.y), layer.z.mul(look.rockiness))
+    const lum = dot(moved, vec3(0.299, 0.587, 0.114))
+    const vivid = max(mix(vec3(lum), moved, look.vivid.mul(1.2).add(1)), 0)
+    const cover = smoothstep(0.05, 0.7, layer.w)
+    // Without colour transport, deposits are plain palette sediment as before.
+    albedo = mix(albedo, look.sand, deposited.mul(float(1).sub(steep.mul(0.7))).mul(float(1).sub(look.colorOn)))
+    albedo = mix(albedo, vivid, cover.mul(look.colorOn))
     const wet = smoothstep(0.002, 0.05, water)
 
     // Snow: above a noisy snow line, lower on slopes facing away from the sun, only where the
@@ -411,11 +445,17 @@ export class TerrainApp {
     const hardView = mix(vec3(0.12, 0.1, 0.09), vec3(0.95, 0.9, 0.8), clamp(hardness.mul(0.35).add(0.5), 0, 1)).add(
       vec3(0.6, -0.1, -0.1).mul(near.y.mul(sim.joints)),
     )
+    // Moved colour on its own, over dark bedrock.
+    const colorView = mix(vec3(0.1), vivid, cover)
     const viewMode = this.view
     material.colorNode = select(
       viewMode.equal(0),
       shaded,
-      select(viewMode.equal(1), waterView, select(viewMode.equal(2), erosionView, hardView)),
+      select(
+        viewMode.equal(1),
+        waterView,
+        select(viewMode.equal(2), erosionView, select(viewMode.equal(3), hardView, colorView)),
+      ),
     )
     material.roughnessNode = mix(mix(float(0.92), float(0.25), clamp(wet.add(depth), 0, 1)), float(0.6), snow)
 
@@ -445,7 +485,9 @@ export class TerrainApp {
     look.snowSlope.value = Math.cos((p.snowSlope * Math.PI) / 180)
     look.snowAspect.value = p.snowAspect
     look.sparkle.value = p.sparkle
-    this.view.value = ['shaded', 'water', 'erosion', 'hardness'].indexOf(p.view)
+    look.colorOn.value = p.colorTransport ? 1 : 0
+    look.vivid.value = p.vividness
+    this.view.value = ['shaded', 'water', 'erosion', 'hardness', 'color'].indexOf(p.view)
     // A rebuild re-applies everything (with a fresh terrain) once the new sim is ready.
     if (this.building) return
     this.sim.setTerrain(p)
