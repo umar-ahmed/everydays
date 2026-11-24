@@ -315,7 +315,9 @@ export const makeShape = (s: Omit<Shape, 'id'>): Shape => ({ ...s, id: nextId++ 
  */
 export function defaultScene(aspect: number): { scene: Scene; rotation: number } {
   const portrait = aspect < 1
-  const place = (x: number, y: number): [number, number] => (portrait ? [y, -x] : [x, y])
+  // The layout spans x in [-1.7, 1.7]; narrower views pull it in (positions only, not sizes).
+  const k = Math.min(1, Math.max(aspect, 1 / aspect) / 1.72)
+  const place = (x: number, y: number): [number, number] => (portrait ? [k * y, -k * x] : [k * x, k * y])
   const turn = portrait ? -Math.PI / 2 : 0
   const at = (x: number, y: number) => {
     const [px, py] = place(x, y)
