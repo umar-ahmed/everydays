@@ -1,8 +1,8 @@
 import { DialRoot, useDialKitController, type DialConfig } from 'dialkit'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { TerrainApp, compactDevice, webgpuAvailable, type Params, type Stats } from './app.ts'
+import { TerrainApp, compactDevice, gpuLimits, type Params, type SizeNotice, type Stats } from './app.ts'
 import { PALETTES, PALETTE_NAMES, type PaletteName } from './palettes.ts'
-import { RESOLUTIONS, defaultResolution, maxResolution } from './sim.ts'
+import { RESOLUTIONS, defaultResolution } from './sim.ts'
 
 const compact = compactDevice()
 
@@ -14,10 +14,11 @@ const dialConfig = {
     roughness: [0.5, 0.25, 0.75, 0.01],
     'ridge mix': [0.55, 0, 1, 0.01],
     'height scale': [2.4, 0.5, 4, 0.05],
-    // Cells per side; the same mountains, finer or coarser. Phones stop at 512.
+    // Cells per side; the same mountains, finer or coarser. Sizes this GPU can't hold fall back
+    // to the largest one it can.
     resolution: {
       type: 'select',
-      options: RESOLUTIONS.filter((r) => r <= maxResolution(compact)).map(String),
+      options: RESOLUTIONS.map(String),
       default: String(defaultResolution(compact)),
     },
   },
@@ -34,15 +35,29 @@ const dialConfig = {
   },
   erosion: {
     'rain amount': [0.012, 0, 0.05, 0.001],
+    // Drifting storm cells: some regions soaked, others dry for a while.
+    'rain variation': [0.6, 0, 1, 0.01],
     capacity: [1, 0.1, 4, 0.05],
     'erosion rate': [0.05, 0, 0.3, 0.005],
     'deposition rate': [0.05, 0, 0.3, 0.005],
     evaporation: [0.015, 0, 0.1, 0.001],
     'thermal weathering': [0.2, 0, 1, 0.01],
+    // Spread of the slump angle across the map (about ±18° at 1).
+    'talus variation': [0.6, 0, 1, 0.01],
+    // At 1024 cells and above, each frame runs fewer steps so orbiting stays smooth.
     'iterations per frame': [12, 1, 60, 1],
   },
+  rock: {
+    // 0 uniform rock; 1 hard bands and blocks erode ~10x slower than soft ones.
+    'hardness variation': [0.6, 0, 1, 0.01],
+    // Thickness of one hard + soft pair of layers, in world units (the map is 10 wide).
+    'strata scale': [0.3, 0.05, 1.5, 0.01],
+    'strata tilt': [12, 0, 60, 1],
+    // Weak fault and joint lines that channels follow.
+    joints: [0.4, 0, 1, 0.01],
+  },
   view: {
-    'debug view': { type: 'select', options: ['shaded', 'water', 'erosion'], default: 'shaded' },
+    'debug view': { type: 'select', options: ['shaded', 'water', 'erosion', 'hardness'], default: 'shaded' },
   },
   reset: { type: 'action' },
   'new seed': { type: 'action' },
@@ -63,6 +78,12 @@ export function Terrain() {
     ridge: v.terrain['ridge mix'],
     heightScale: v.terrain['height scale'],
     rain: v.erosion['rain amount'],
+    rainVariation: v.erosion['rain variation'],
+    talusVariation: v.erosion['talus variation'],
+    hardness: v.rock['hardness variation'],
+    strataScale: v.rock['strata scale'],
+    strataTilt: v.rock['strata tilt'],
+    joints: v.rock.joints,
     capacity: v.erosion.capacity,
     erosion: v.erosion['erosion rate'],
     deposition: v.erosion['deposition rate'],
@@ -90,17 +111,31 @@ export function Terrain() {
   const container = useRef<HTMLDivElement>(null)
   const appRef = useRef<TerrainApp | null>(null)
   const [status, setStatus] = useState<Status>('loading')
+  const [notice, setNotice] = useState<string | null>(null)
+  const onSize = useRef<(s: SizeNotice) => void>(() => {})
+  useEffect(() => {
+    onSize.current = (s) => {
+      setNotice(s.reason)
+      if (s.actual !== s.requested) dial.setValue('terrain.resolution', String(s.actual))
+    }
+  })
+  useEffect(() => {
+    if (!notice) return
+    const id = setTimeout(() => setNotice(null), 9000)
+    return () => clearTimeout(id)
+  }, [notice])
 
   useEffect(() => {
     let app: TerrainApp | null = null
     let cancelled = false
     void (async () => {
-      if (!(await webgpuAvailable())) {
+      const limits = await gpuLimits()
+      if (!limits) {
         if (!cancelled) setStatus('unsupported')
         return
       }
       if (cancelled || !container.current) return
-      app = new TerrainApp(container.current, paramsRef.current, stepStore.set)
+      app = new TerrainApp(container.current, paramsRef.current, limits, stepStore.set, (s) => onSize.current(s))
       try {
         await app.init()
       } catch {
@@ -191,6 +226,16 @@ export function Terrain() {
               reset
             </button>
           </div>
+        )}
+        {notice && (
+          <button
+            type="button"
+            role="status"
+            onClick={() => setNotice(null)}
+            className="absolute bottom-16 left-1/2 max-w-[min(92vw,30rem)] -translate-x-1/2 rounded-xl border border-amber-200/30 bg-black/55 px-4 py-2.5 text-left font-mono text-[11px] leading-relaxed text-amber-100/90 backdrop-blur sm:bottom-20"
+          >
+            {notice}
+          </button>
         )}
       </main>
       <DialRoot

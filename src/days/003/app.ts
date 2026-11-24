@@ -20,7 +20,6 @@ import {
   smoothstep,
   transformNormalToView,
   uniform,
-  varying,
   vec3,
   vertexIndex,
 } from 'three/tsl'
@@ -28,13 +27,23 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import * as THREE from 'three/webgpu'
 import type { Node } from 'three/webgpu'
 import { Look, PALETTES, type PaletteName } from './palettes.ts'
-import { ErosionSim, SIZE, defaultResolution, maxResolution, type ErosionParams, type TerrainParams } from './sim.ts'
+import {
+  ErosionSim,
+  RESOLUTIONS,
+  SIZE,
+  bufferBytes,
+  defaultResolution,
+  fitResolution,
+  simBytes,
+  type ErosionParams,
+  type TerrainParams,
+} from './sim.ts'
 
 export type Params = TerrainParams &
   ErosionParams & {
     eroding: boolean
     iterations: number
-    view: 'shaded' | 'water' | 'erosion'
+    view: 'shaded' | 'water' | 'erosion' | 'hardness'
     /** Cells per side of the heightfield. */
     resolution: number
     palette: PaletteName
@@ -46,31 +55,56 @@ export type Params = TerrainParams &
     sparkle: number
   }
 
-/** Phones get a smaller default grid and stop at 512 (see sim.ts). */
+/** Phones get a smaller default grid and render mesh. */
 export const compactDevice = () => typeof screen !== 'undefined' && Math.min(screen.width, screen.height) < 600
+
+/** Most vertices per side of the render mesh; finer sims are shaded per pixel from the grid. */
+const meshMax = () => (compactDevice() ? 512 : 1024)
+/** Cell-steps per frame the Iterations dial is measured against: finer grids run fewer steps a
+ * frame (fractionally, down to one every few frames) so orbiting stays smooth. */
+const FRAME_BUDGET = 1024 * 1024
 
 /** Direction toward the sun (the key light sits at -6, 5, 3). */
 const SUN = new THREE.Vector3(-6, 5, 3).normalize()
 
 export type Stats = { steps: number }
+/** The grid size actually running, and why it isn't the one asked for (if it isn't). */
+export type SizeNotice = { requested: number; actual: number; reason: string | null }
 
-export async function webgpuAvailable() {
-  if (!('gpu' in navigator) || !navigator.gpu) return false
+export type Limits = { maxBufferSize: number; maxStorageBufferBindingSize: number }
+
+/** The adapter's buffer limits, or null without WebGPU. */
+export async function gpuLimits(): Promise<Limits | null> {
+  if (!('gpu' in navigator) || !navigator.gpu) return null
   try {
-    return (await navigator.gpu.requestAdapter()) !== null
+    const adapter = await navigator.gpu.requestAdapter()
+    if (!adapter) return null
+    return {
+      maxBufferSize: adapter.limits.maxBufferSize,
+      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+    }
   } catch {
-    return false
+    return null
   }
 }
 
+const mib = (bytes: number) =>
+  bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`
+
 const terrainKey = (p: TerrainParams) => `${p.seed}/${p.octaves}/${p.roughness}/${p.ridge}/${p.heightScale}`
+
+type GPUErrorScopes = {
+  pushErrorScope(filter: 'validation' | 'out-of-memory'): void
+  popErrorScope(): Promise<{ message: string } | null>
+}
 
 export class TerrainApp {
   private renderer: THREE.WebGPURenderer
   private scene = new THREE.Scene()
   private camera = new THREE.PerspectiveCamera(40, 1, 0.05, 200)
   private controls: OrbitControls
-  sim: ErosionSim
+  /** Set once `init` resolves; replaced (after the old one is freed) when the size changes. */
+  sim!: ErosionSim
   private mesh: THREE.Mesh | null = null
   private look = new Look()
   private palette = ''
@@ -78,19 +112,43 @@ export class TerrainApp {
   private key = ''
   private view = uniform(0, 'int')
   private steps = 0
+  private owed = 0
   private disposed = false
+  private building = false
+  private requested = 0
+  private limits: Limits
   private resize = new ResizeObserver(() => this.fit())
   private container: HTMLElement
   private onStats: (s: Stats) => void
+  private onSize: (s: SizeNotice) => void
   private lastStats = 0
 
-  constructor(container: HTMLElement, params: Params, onStats: (s: Stats) => void) {
+  constructor(
+    container: HTMLElement,
+    params: Params,
+    limits: Limits,
+    onStats: (s: Stats) => void,
+    onSize: (s: SizeNotice) => void,
+  ) {
     this.container = container
     this.params = params
+    this.limits = limits
     this.onStats = onStats
-    this.sim = new ErosionSim(this.resolutionFor(params.resolution))
-    this.renderer = new THREE.WebGPURenderer({ antialias: true })
+    this.onSize = onSize
+    // Ask for the adapter's full buffer limits: the defaults (128 MB per storage binding) stop
+    // at 2048, and a 4096 grid needs 256 MB per buffer.
+    this.renderer = new THREE.WebGPURenderer({
+      antialias: true,
+      requiredLimits: { ...limits },
+    } as ConstructorParameters<typeof THREE.WebGPURenderer>[0])
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    // Some browsers drop the whole device when a big grid runs them out of memory.
+    this.renderer.onDeviceLost = () =>
+      this.onSize({
+        requested: this.requested,
+        actual: this.requested,
+        reason: 'The GPU was reset (most likely out of memory). Reload the page and pick a smaller resolution.',
+      })
     // Neutral keeps the palettes' hues and saturation (AgX greyed the presets out).
     this.renderer.toneMapping = THREE.NeutralToneMapping
     const canvas = this.renderer.domElement
@@ -125,63 +183,168 @@ export class TerrainApp {
     controls.maxPolarAngle = Math.PI * 0.47
     controls.update()
 
-    this.mesh = this.makeTerrain()
-    scene.add(this.mesh)
-    this.apply(this.params, true)
+    this.requested = this.requestedSize(this.params)
+    await this.rebuild()
+    if (this.disposed) return
     this.resize.observe(this.container)
     this.fit()
     await this.renderer.setAnimationLoop(this.frame)
   }
 
+  private requestedSize(p: Params) {
+    return p.resolution || defaultResolution(compactDevice())
+  }
+
+  /**
+   * Allocate a sim at `n` and fill it, watching for errors: a size can pass the limit check and
+   * still not fit in the GPU's memory. Returns null (with everything freed) if it didn't fit.
+   */
+  private async allocate(n: number) {
+    const device = (this.renderer.backend as unknown as { device: GPUErrorScopes }).device
+    device.pushErrorScope('out-of-memory')
+    device.pushErrorScope('validation')
+    let sim: ErosionSim | null = null
+    let failed = false
+    try {
+      sim = new ErosionSim(n)
+      sim.setTerrain(this.params)
+      sim.setErosion(this.params)
+      // Generating writes every buffer, so they are all allocated by the time this returns.
+      sim.reset(this.renderer)
+    } catch {
+      failed = true
+    }
+    const invalid = await device.popErrorScope()
+    const oom = await device.popErrorScope()
+    if (!failed && !invalid && !oom && sim) return sim
+    sim?.dispose()
+    return null
+  }
+
+  /**
+   * Swap in a sim (and mesh) at the requested size, or the largest size below it that this GPU
+   * can hold. The old one is freed first so a big grid doesn't need room for both. The noise is
+   * in sheet coordinates, so the same mountains come back, just finer or coarser.
+   */
+  private async rebuild() {
+    if (this.building) return
+    this.building = true
+    for (;;) {
+      const target = this.requested
+      if (this.mesh) {
+        this.scene.remove(this.mesh)
+        this.mesh.geometry.dispose()
+        ;(this.mesh.material as THREE.Material).dispose()
+        this.mesh = null
+        this.sim.dispose()
+      }
+      let n = fitResolution(target, this.limits)
+      const cap = Math.min(this.limits.maxBufferSize, this.limits.maxStorageBufferBindingSize)
+      let reason =
+        n < target
+          ? `${target}² needs ${mib(bufferBytes(target))} per buffer; this GPU allows ${mib(cap)}, so it's running ${n}².`
+          : null
+      let sim = await this.allocate(n)
+      while (!sim && n > RESOLUTIONS[0]) {
+        const lower = RESOLUTIONS[RESOLUTIONS.indexOf(n as (typeof RESOLUTIONS)[number]) - 1]
+        reason = `${n}² ran out of GPU memory (it needs ${mib(simBytes(n))}), so it's running ${lower}².`
+        n = lower
+        sim = await this.allocate(n)
+      }
+      if (!sim) throw new Error('terrain-allocation-failed')
+      this.sim = sim
+      this.mesh = this.makeTerrain()
+      this.scene.add(this.mesh)
+      if (this.disposed) break
+      // Another size was picked while this one was building: go again.
+      if (this.requested !== target) continue
+      // The dial gets moved to the size that runs; that shouldn't rebuild again.
+      this.requested = n
+      this.onSize({ requested: target, actual: n, reason })
+      break
+    }
+    this.building = false
+    this.apply(this.params, true)
+  }
+
   private makeTerrain() {
     const { sim } = this
     const n = sim.n
-    // Positions come from the sim; the attribute only sizes the vertex range.
+    // The mesh is at most meshMax() per side; its vertices sample the grid bilinearly. Normals,
+    // water and colour are looked up per pixel from the full grid, so a 4096 sim keeps its
+    // detail on a 1024 mesh.
+    const m = Math.min(n, meshMax())
     const geometry = new THREE.BufferGeometry()
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(n * n * 3), 3))
-    const index = new Uint32Array((n - 1) * (n - 1) * 6)
+    // Positions come from the sim; the attribute only sizes the vertex range.
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(m * m * 3), 3))
+    const index = new Uint32Array((m - 1) * (m - 1) * 6)
     let k = 0
-    for (let y = 0; y < n - 1; y++) {
-      for (let x = 0; x < n - 1; x++) {
-        const a = y * n + x
-        index.set([a, a + n, a + 1, a + 1, a + n, a + n + 1], k)
+    for (let y = 0; y < m - 1; y++) {
+      for (let x = 0; x < m - 1; x++) {
+        const a = y * m + x
+        index.set([a, a + m, a + 1, a + 1, a + m, a + m + 1], k)
         k += 6
       }
     }
     geometry.setIndex(new THREE.BufferAttribute(index, 1))
 
     const N = int(n)
-    const i = int(vertexIndex)
-    const x = i.mod(N)
-    const y = i.div(N)
-    const iclamp = (v: typeof x) => select(v.lessThan(0), int(0), select(v.greaterThan(N.sub(1)), N.sub(1), v))
-    const at = (dx: number, dy: number) =>
-      sim.state.element(
-        iclamp(y.add(dy))
-          .mul(N)
-          .add(iclamp(x.add(dx))),
+    type I = Node<'int'>
+    type F = Node<'float'>
+    const iclamp = (v: I) => select(v.lessThan(0), int(0), select(v.greaterThan(N.sub(1)), N.sub(1), v))
+    const cellAt = (x: I, y: I) => sim.state.element(iclamp(y).mul(N).add(iclamp(x)))
+    /** Bilinear lookup of the state at fractional cell coordinates. */
+    const sample = (cx: F, cy: F) => {
+      const x0 = int(floor(cx))
+      const y0 = int(floor(cy))
+      const tx = fract(cx)
+      const ty = fract(cy)
+      return mix(
+        mix(cellAt(x0, y0), cellAt(x0.add(1), y0), tx),
+        mix(cellAt(x0, y0.add(1)), cellAt(x0.add(1), y0.add(1)), tx),
+        ty,
       )
-    const s = sim.state.element(i)
+    }
     const cell = sim.cell
-    const world = (u: Node<'float'>) => u.mul(cell)
+    const vi = int(vertexIndex)
+    const stride = (n - 1) / (m - 1)
+    const vx = float(vi.mod(int(m))).mul(stride)
+    const vy = float(vi.div(int(m))).mul(stride)
+    const vs = sample(vx, vy)
     const material = new THREE.MeshStandardNodeMaterial({ roughness: 0.9 })
     material.positionNode = vec3(
-      float(x)
-        .mul(cell)
-        .sub(SIZE / 2),
-      world(s.x.add(s.y.mul(0.6))),
-      float(y)
-        .mul(cell)
-        .sub(SIZE / 2),
+      vx.mul(cell).sub(SIZE / 2),
+      vs.x.add(vs.y.mul(0.6)).mul(cell),
+      vy.mul(cell).sub(SIZE / 2),
     )
-    // Normal of the terrain surface (not the water) from central differences, in world units.
-    const gx = at(1, 0).x.sub(at(-1, 0).x).mul(cell)
-    const gz = at(0, 1).x.sub(at(0, -1).x).mul(cell)
-    const normal = varying(normalize(vec3(gx.negate(), cell * 2, gz.negate())))
+
+    // Per pixel: the grid position under this fragment.
+    const c = positionWorld.xz
+      .add(SIZE / 2)
+      .div(cell)
+      .clamp(0, n - 1)
+    const s = sample(c.x, c.y)
+    // Normal of the terrain surface (not the water): central differences at the four cells
+    // around the pixel, blended bilinearly so it is smooth at any zoom.
+    const fx = int(floor(c.x))
+    const fy = int(floor(c.y))
+    const h = (dx: number, dy: number) => cellAt(fx.add(dx), fy.add(dy)).x
+    const grad = (dx: number, dy: number) => vec2(h(dx + 1, dy).sub(h(dx - 1, dy)), h(dx, dy + 1).sub(h(dx, dy - 1)))
+    const tx = fract(c.x)
+    const ty = fract(c.y)
+    const g = mix(mix(grad(0, 0), grad(1, 0), tx), mix(grad(0, 1), grad(1, 1), tx), ty).mul(cell)
+    const normal = normalize(vec3(g.x.negate(), cell * 2, g.y.negate()))
     material.normalNode = transformNormalToView(normal)
-    const height = varying(s.x)
-    const water = varying(s.y)
-    const change = varying(s.x.sub(s.w))
+    const height = s.x
+    const water = s.y
+    const change = s.x.sub(s.w)
+    const near = sim.rock.element(
+      iclamp(int(floor(c.y.add(0.5))))
+        .mul(N)
+        .add(iclamp(int(floor(c.x.add(0.5))))),
+    )
+    const stratum = sim.strataBand(c.x, c.y, height, near)
+    const hardness = sim.hardnessLog(c.x, c.y, height, near)
 
     const { look } = this
     // Slope: 1 flat, 0 vertical.
@@ -199,10 +362,9 @@ export class TerrainApp {
     const iso = relief.mul(20)
     const isoDist = min(fract(iso), float(1).sub(fract(iso))).div(max(fwidth(iso), 1e-4))
     const ground = ramp.mul(float(1).sub(look.contours.mul(float(1).sub(clamp(isoDist, 0, 1)))))
-    // Exposed rock shows strata: bands in height, warmer where the water cut through them.
-    const band = smoothstep(0.3, 0.7, fract(positionWorld.y.mul(5.5)))
-      .sub(0.5)
-      .mul(look.strata)
+    // Exposed rock shows the same strata the erosion cuts through: hard bands paler, soft
+    // darker, warmer where the water cut through them.
+    const band = stratum.mul(0.5).mul(look.strata)
     const rock = mix(look.rock, look.rockCut, smoothstep(-0.3, -3, change)).add(band.mul(steep))
     const deposited = smoothstep(0.02, 0.35, change)
     let albedo = mix(ground, rock, steep.mul(look.rockiness))
@@ -238,15 +400,23 @@ export class TerrainApp {
       .mul(snow)
       .mul(look.sparkle)
     material.emissiveNode = vec3(glint.mul(2.5))
-    // Debug views: water depth, and terrain change (blue cut, orange filled).
+    // Debug views: water depth; terrain change (blue cut, orange filled); rock hardness (dark
+    // soft, pale hard, joints red).
     const waterView = mix(vec3(0.08), vec3(0.2, 0.6, 1), clamp(water.mul(2), 0, 1))
     const erosionView = select(
       change.lessThan(0),
       mix(vec3(0.85), vec3(0.15, 0.35, 0.9), clamp(change.negate().div(3), 0, 1)),
       mix(vec3(0.85), vec3(0.95, 0.55, 0.15), clamp(change.div(1.5), 0, 1)),
     )
+    const hardView = mix(vec3(0.12, 0.1, 0.09), vec3(0.95, 0.9, 0.8), clamp(hardness.mul(0.35).add(0.5), 0, 1)).add(
+      vec3(0.6, -0.1, -0.1).mul(near.y.mul(sim.joints)),
+    )
     const viewMode = this.view
-    material.colorNode = select(viewMode.equal(0), shaded, select(viewMode.equal(1), waterView, erosionView))
+    material.colorNode = select(
+      viewMode.equal(0),
+      shaded,
+      select(viewMode.equal(1), waterView, select(viewMode.equal(2), erosionView, hardView)),
+    )
     material.roughnessNode = mix(mix(float(0.92), float(0.25), clamp(wet.add(depth), 0, 1)), float(0.6), snow)
 
     const mesh = new THREE.Mesh(geometry, material)
@@ -255,33 +425,15 @@ export class TerrainApp {
   }
 
   setParams(params: Params) {
-    this.params = params
     this.apply(params, false)
   }
 
-  private resolutionFor(requested: number) {
-    const compact = compactDevice()
-    return Math.min(requested || defaultResolution(compact), maxResolution(compact))
-  }
-
-  /** A new sim and mesh at another grid size; the noise is in sheet coordinates, so the same
-   * mountains come back, just finer or coarser. */
-  private rebuild(n: number) {
-    if (this.mesh) {
-      this.scene.remove(this.mesh)
-      this.mesh.geometry.dispose()
-      ;(this.mesh.material as THREE.Material).dispose()
-    }
-    this.sim = new ErosionSim(n)
-    this.mesh = this.makeTerrain()
-    this.scene.add(this.mesh)
-  }
-
   private apply(p: Params, force: boolean) {
-    const n = this.resolutionFor(p.resolution)
-    if (n !== this.sim.n) {
-      this.rebuild(n)
-      force = true
+    this.params = p
+    const requested = this.requestedSize(p)
+    if (requested !== this.requested) {
+      this.requested = requested
+      void this.rebuild()
     }
     const { look } = this
     if (p.palette !== this.palette) {
@@ -293,9 +445,11 @@ export class TerrainApp {
     look.snowSlope.value = Math.cos((p.snowSlope * Math.PI) / 180)
     look.snowAspect.value = p.snowAspect
     look.sparkle.value = p.sparkle
+    this.view.value = ['shaded', 'water', 'erosion', 'hardness'].indexOf(p.view)
+    // A rebuild re-applies everything (with a fresh terrain) once the new sim is ready.
+    if (this.building) return
     this.sim.setTerrain(p)
     this.sim.setErosion(p)
-    this.view.value = ['shaded', 'water', 'erosion'].indexOf(p.view)
     const key = terrainKey(p)
     if (force || key !== this.key) {
       this.key = key
@@ -305,16 +459,24 @@ export class TerrainApp {
 
   /** Regenerate the terrain and start erosion over. */
   reset() {
+    if (this.building) return
     this.sim.reset(this.renderer)
     this.steps = 0
+    this.owed = 0
     this.onStats({ steps: 0 })
   }
 
   /** Run erosion steps without waiting for frames (for the OG card and tests). */
   fastForward(steps: number) {
+    if (this.building) return
     for (let done = 0; done < steps; done += 50) this.sim.run(this.renderer, Math.min(50, steps - done))
     this.steps += steps
     this.onStats({ steps: this.steps })
+  }
+
+  /** Wait for the GPU to finish the queued work (reads back one cell). */
+  async sync() {
+    await this.renderer.getArrayBufferAsync(this.sim.state.value, null, 0, 16)
   }
 
   private fit = () => {
@@ -327,9 +489,15 @@ export class TerrainApp {
 
   private frame = () => {
     const { params } = this
+    if (this.building || !this.mesh) return
     if (params.eroding && params.iterations > 0) {
-      this.sim.run(this.renderer, params.iterations)
-      this.steps += params.iterations
+      this.owed += params.iterations * Math.min(1, FRAME_BUDGET / (this.sim.n * this.sim.n))
+      const run = Math.floor(this.owed)
+      if (run > 0) {
+        this.owed -= run
+        this.sim.run(this.renderer, run)
+        this.steps += run
+      }
       const now = performance.now()
       if (now - this.lastStats > 200) {
         this.lastStats = now
@@ -345,6 +513,7 @@ export class TerrainApp {
     void this.renderer.setAnimationLoop(null)
     this.resize.disconnect()
     this.controls.dispose()
+    if (this.mesh) this.sim.dispose()
     void this.renderer.dispose()
     this.renderer.domElement.remove()
   }
