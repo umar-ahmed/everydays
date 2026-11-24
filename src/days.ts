@@ -27,6 +27,13 @@ export const days: Day[] = [
       'A procedural mountain range eroded on the GPU: fractal noise terrain, rain carving valleys and river channels, sediment fans and cliffs, live.',
     date: '2026-11-23',
   },
+  {
+    slug: '004',
+    title: 'spectral pathtracer',
+    concept:
+      'A 2D spectral pathtracer on the GPU: a flashlight, glass prisms that split white light into rainbows, and mirrors in triangle, circle and hexagon shapes you can drag and turn.',
+    date: '2026-11-24',
+  },
 ]
 
 export const site = {

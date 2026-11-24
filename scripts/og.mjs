@@ -18,6 +18,7 @@ const [latestSlug, latestTitle] = days.at(-1).slice(1)
 mkdirSync('public/001', { recursive: true })
 mkdirSync('public/002', { recursive: true })
 mkdirSync('public/003', { recursive: true })
+mkdirSync('public/004', { recursive: true })
 mkdirSync(framesDir, { recursive: true })
 
 const browser = await chromium.launch({
@@ -162,11 +163,29 @@ async function day003() {
   await page.close()
 }
 
+async function day004() {
+  const page = await browser.newPage({ viewport: size, deviceScaleFactor: 1 })
+  // Software WebGPU traces a few frames a second; give the default scene time to converge.
+  page.setDefaultTimeout(600000)
+  await page.goto(`${base}/004/`)
+  await page.waitForFunction(() => window.light, null, { timeout: 120000 })
+  await page.mouse.click(size.width - 37, 37)
+  await page.addStyleTag({ content: '.dialkit-root,[data-chrome]{display:none!important}' })
+  await page.waitForFunction(() => window.light.paths >= 1_500_000, null, { polling: 1000 })
+  await page.evaluate(() => {
+    window.light.paused = true
+  })
+  await page.waitForTimeout(3000)
+  await page.screenshot({ path: 'public/004/og.png' })
+  await page.close()
+}
+
 if (want('index')) await indexCard()
 if (want('001')) await day001()
 if (want('002')) await day002()
 if (want('003')) await day003()
+if (want('004')) await day004()
 await browser.close()
 console.log(
-  `wrote ${only ? [...only].join(', ') : 'index, 001, 002, 003'} cards (day 001 frame ${pick}; frames in ${framesDir})`,
+  `wrote ${only ? [...only].join(', ') : 'index, 001, 002, 003, 004'} cards (day 001 frame ${pick}; frames in ${framesDir})`,
 )
