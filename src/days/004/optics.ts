@@ -305,6 +305,38 @@ export function tracePath(
   return out
 }
 
+/** How far inside the walls `refit` keeps the flashlight and shape centres. */
+const MARGIN = 0.15
+
+/**
+ * Keeps a scene inside the room when the window changes shape. Flipping between landscape and
+ * portrait turns the whole layout a quarter turn (as the default layout does), then positions
+ * shrink toward the centre if they no longer fit and are clamped inside the walls.
+ */
+export function refit(scene: Scene, rotation: number, from: View, to: View): { scene: Scene; rotation: number } {
+  const toPortrait = to.hw < to.hh
+  const flip = from.hw < from.hh !== toPortrait
+  const turn = (x: number, y: number): [number, number] => (!flip ? [x, y] : toPortrait ? [y, -x] : [-y, x])
+  const spin = flip ? (toPortrait ? -1 : 1) : 0
+  const points = [scene.flashlight, ...scene.shapes].map((p) => turn(p.x, p.y))
+  const reach = Math.max(
+    1,
+    ...points.map(([x, y]) => Math.max(Math.abs(x) / (to.hw - MARGIN), Math.abs(y) / (to.hh - MARGIN))),
+  )
+  const place = (x: number, y: number) => {
+    const [tx, ty] = turn(x, y)
+    const clamp = (v: number, h: number) => Math.max(-(h - MARGIN), Math.min(h - MARGIN, v / reach))
+    return { x: clamp(tx, to.hw), y: clamp(ty, to.hh) }
+  }
+  return {
+    scene: {
+      flashlight: place(scene.flashlight.x, scene.flashlight.y),
+      shapes: scene.shapes.map((s) => ({ ...s, ...place(s.x, s.y), angle: s.angle + (spin * Math.PI) / 2 })),
+    },
+    rotation: ((((rotation + spin * 90 + 180) % 360) + 360) % 360) - 180,
+  }
+}
+
 let nextId = 1
 export const makeShape = (s: Omit<Shape, 'id'>): Shape => ({ ...s, id: nextId++ })
 

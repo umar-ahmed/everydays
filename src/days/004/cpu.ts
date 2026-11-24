@@ -96,7 +96,7 @@ export class CpuTracer implements Tracer {
     this.raf = requestAnimationFrame(this.frame)
     const { scene, optics, compiled: c, width: W, height: H, acc } = this
     if (!scene || !optics || !c || this.paused) return
-    const view = viewFor(W / H)
+    const view = viewFor(this.container.clientWidth / Math.max(1, this.container.clientHeight))
     const sx = W / (2 * view.hw)
     const sy = H / (2 * view.hh)
     const until = performance.now() + BUDGET

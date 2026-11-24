@@ -9,6 +9,7 @@ import {
   defaultScene,
   makeShape,
   polygon,
+  refit,
   viewFor,
   type Material,
   type Optics,
@@ -40,13 +41,14 @@ const dialConfig = {
   },
   light: {
     bounces: [8, 1, MAX_BOUNCES, 1],
-    exposure: [1, 0.1, 8, 0.05],
+    exposure: [0.85, 0.1, 8, 0.05],
     // Thousands of light paths traced per frame.
     'samples per frame': [compact ? 8 : 24, 1, MAX_PATHS / 1024, 1],
     // Scattering in the air: beams fade and glow as they go.
-    haze: [0.08, 0, 1.5, 0.01],
-    // How much light the walls bounce back (diffusely).
-    walls: [0.3, 0, 0.9, 0.01],
+    haze: [0.05, 0, 1.5, 0.01],
+    // The window's edges are the room's walls: grey Lambertian reflectors bouncing back this
+    // fraction of the light, whatever its colour.
+    walls: [0.7, 0, 0.95, 0.01],
   },
   'reset scene': { type: 'action' },
 } satisfies DialConfig
@@ -108,6 +110,19 @@ export function Light() {
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
+
+  // The walls are the window's edges: when it changes shape, bring the scene along.
+  const lastView = useRef<typeof view | null>(null)
+  useEffect(() => {
+    if (size.width <= 1 || size.height <= 1) return
+    const from = lastView.current ?? viewFor(initialAspect)
+    lastView.current = view
+    if (from.hw === view.hw && from.hh === view.hh) return
+    const { scene, optics } = latest.current
+    const next = refit(scene, optics.rotation, from, view)
+    setScene(next.scene)
+    if (next.rotation !== optics.rotation) dial.setValue('flashlight.rotation', next.rotation)
+  }, [view.hw, view.hh, size.width, size.height, dial])
 
   useEffect(() => {
     let tracer: Tracer | null = null
@@ -359,6 +374,17 @@ export function Light() {
           onPointerCancel={onPointerUp}
           aria-label="Optical bench: drag the flashlight and shapes"
         >
+          <rect
+            x={-view.hw}
+            y={-view.hh}
+            width={2 * view.hw}
+            height={2 * view.hh}
+            fill="none"
+            stroke="rgba(255,255,255,0.16)"
+            strokeWidth={2}
+            vectorEffect="non-scaling-stroke"
+            pointerEvents="none"
+          />
           {scene.shapes.map((s) => (
             <ShapeView key={s.id} shape={s} selected={s.id === selected} />
           ))}

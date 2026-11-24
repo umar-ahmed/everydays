@@ -4,10 +4,12 @@ import {
   LAMBDA_MIN,
   cauchy,
   compile,
+  defaultScene,
   fresnel,
   intersect,
   makeShape,
   polygon,
+  refit,
   spectralRgb,
   tracePath,
   type Optics,
@@ -121,10 +123,57 @@ describe('tracing', () => {
     expect(exitAngle(650)).toBeGreaterThan(0)
   })
 
+  it('bounces off the view edges diffusely, with a cosine-weighted lobe', () => {
+    const s = { flashlight: { x: 0, y: 0 }, shapes: [] }
+    const walls = { ...optics, walls: 1, bounces: 16, cone: 360 }
+    let rng = 7
+    const rand = () => ((rng = (rng * 16807) % 2147483647) - 1) / 2147483646
+    let cosSum = 0
+    let n = 0
+    for (let p = 0; p < 400; p++) {
+      const segs = tracePath(compile([]), view, s, walls, 550, rand)
+      expect(segs).toHaveLength(17)
+      for (let i = 0; i < segs.length; i++) {
+        const g = segs[i]
+        expect(Math.abs(g.x1)).toBeLessThanOrEqual(view.hw + 1e-6)
+        expect(Math.abs(g.y1)).toBeLessThanOrEqual(view.hh + 1e-6)
+        const onWall = Math.abs(Math.abs(g.x1) - view.hw) < 1e-6 || Math.abs(Math.abs(g.y1) - view.hh) < 1e-6
+        expect(onWall).toBe(true)
+        if (i + 1 < segs.length) {
+          const next = segs[i + 1]
+          const len = Math.hypot(next.x1 - next.x0, next.y1 - next.y0)
+          const normal = Math.abs(Math.abs(g.x1) - view.hw) < 1e-6 ? [-Math.sign(g.x1), 0] : [0, -Math.sign(g.y1)]
+          cosSum += ((next.x1 - next.x0) * normal[0] + (next.y1 - next.y0) * normal[1]) / len
+          n++
+        }
+      }
+    }
+    // A 2D Lambertian lobe (pdf cos θ / 2) has a mean cosine of π/4.
+    expect(cosSum / n).toBeCloseTo(Math.PI / 4, 1)
+  })
+
   it('ends a path at an absorbing wall', () => {
     const s = { flashlight: { x: 0, y: 0 }, shapes: [] }
     const segs = tracePath(compile([]), view, s, optics, 550, () => 0.5)
     expect(segs).toHaveLength(1)
     expect(segs[0].x1).toBeCloseTo(2)
+  })
+})
+
+describe('refit', () => {
+  it('turns the layout a quarter turn into portrait and keeps everything inside the walls', () => {
+    const land = { hw: 1.78, hh: 1 }
+    const port = { hw: 1, hh: 2.16 }
+    const { scene, rotation } = defaultScene(land.hw)
+    const out = refit(scene, rotation, land, port)
+    expect(out.rotation).toBeCloseTo(rotation - 90)
+    for (const p of [out.scene.flashlight, ...out.scene.shapes]) {
+      expect(Math.abs(p.x)).toBeLessThan(port.hw)
+      expect(Math.abs(p.y)).toBeLessThan(port.hh)
+    }
+    const back = refit(out.scene, out.rotation, port, land)
+    expect(back.rotation).toBeCloseTo(rotation)
+    expect(back.scene.shapes[0].angle).toBeCloseTo(scene.shapes[0].angle)
+    expect(refit(scene, rotation, land, { hw: 1.6, hh: 1 }).rotation).toBe(rotation)
   })
 })
