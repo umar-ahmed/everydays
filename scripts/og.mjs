@@ -19,6 +19,7 @@ mkdirSync('public/001', { recursive: true })
 mkdirSync('public/002', { recursive: true })
 mkdirSync('public/003', { recursive: true })
 mkdirSync('public/004', { recursive: true })
+mkdirSync('public/005', { recursive: true })
 mkdirSync(framesDir, { recursive: true })
 
 const browser = await chromium.launch({
@@ -180,12 +181,26 @@ async function day004() {
   await page.close()
 }
 
+async function day005() {
+  const page = await browser.newPage({ viewport: size, deviceScaleFactor: 1 })
+  await page.goto(`${base}/005/`)
+  await page.waitForFunction(() => window.magnetic && document.fonts.check("400 100px 'Roboto Flex Magnetic'"))
+  await page.addStyleTag({ content: '.dialkit-root,[data-chrome]{display:none!important}' })
+  await page.waitForTimeout(800)
+  // Rest the probe just right of centre on 'magnetic', between the g and the n, and let the springs settle.
+  await page.evaluate(() => window.magnetic.probe(innerWidth * 0.52, innerHeight * 0.5))
+  await page.waitForTimeout(2500)
+  await page.screenshot({ path: 'public/005/og.png' })
+  await page.close()
+}
+
 if (want('index')) await indexCard()
 if (want('001')) await day001()
 if (want('002')) await day002()
 if (want('003')) await day003()
 if (want('004')) await day004()
+if (want('005')) await day005()
 await browser.close()
 console.log(
-  `wrote ${only ? [...only].join(', ') : 'index, 001, 002, 003, 004'} cards (day 001 frame ${pick}; frames in ${framesDir})`,
+  `wrote ${only ? [...only].join(', ') : 'index, 001, 002, 003, 004, 005'} cards (day 001 frame ${pick}; frames in ${framesDir})`,
 )

@@ -34,6 +34,13 @@ export const days: Day[] = [
       'A 2D spectral pathtracer on the GPU: a flashlight, glass prisms that split white light into rainbows, and mirrors in triangle, circle and hexagon shapes you can drag and turn.',
     date: '2026-11-24',
   },
+  {
+    slug: '005',
+    title: 'magnetic type',
+    concept:
+      'A magnifying glass made of type: letters in a variable font swell in weight and width as your cursor or finger nears, then spring back.',
+    date: '2026-11-25',
+  },
 ]
 
 export const site = {

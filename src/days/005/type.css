@@ -1,0 +1,8 @@
+/* Roboto Flex (SIL OFL 1.1, see font/OFL.txt), Latin subset with just the wght and wdth axes. */
+@font-face {
+  font-family: 'Roboto Flex Magnetic';
+  src: url('./font/RobotoFlex-wght-wdth-latin.woff2') format('woff2');
+  font-weight: 100 1000;
+  font-stretch: 25% 151%;
+  font-display: block;
+}
