@@ -6,6 +6,8 @@ import { GpuTracer, MAX_BOUNCES, type Tracer } from './gpu.ts'
 import {
   LENS_OFFSET,
   MAX_SHAPES,
+  TINTS,
+  TINT_ORDER,
   defaultScene,
   makeShape,
   polygon,
@@ -49,6 +51,8 @@ const dialConfig = {
     // The window's edges are the room's walls: grey Lambertian reflectors bouncing back this
     // fraction of the light, whatever its colour.
     walls: [0.7, 0, 0.95, 0.01],
+    // Share of light matte shapes bounce back, before their tint's spectral curve.
+    'diffuse albedo': [0.8, 0, 0.95, 0.01],
   },
   'reset scene': { type: 'action' },
 } satisfies DialConfig
@@ -85,6 +89,7 @@ export function Light() {
     dispersion: v.glass.dispersion,
     haze: v.light.haze,
     walls: v.light.walls,
+    albedo: v.light['diffuse albedo'],
   }
   const samples = v.light['samples per frame'] * 1024
   const exposure = v.light.exposure
@@ -115,14 +120,15 @@ export function Light() {
   const lastView = useRef<typeof view | null>(null)
   useEffect(() => {
     if (size.width <= 1 || size.height <= 1) return
+    const to = viewFor(size.width / size.height)
     const from = lastView.current ?? viewFor(initialAspect)
-    lastView.current = view
-    if (from.hw === view.hw && from.hh === view.hh) return
+    lastView.current = to
+    if (from.hw === to.hw && from.hh === to.hh) return
     const { scene, optics } = latest.current
-    const next = refit(scene, optics.rotation, from, view)
+    const next = refit(scene, optics.rotation, from, to)
     setScene(next.scene)
     if (next.rotation !== optics.rotation) dial.setValue('flashlight.rotation', next.rotation)
-  }, [view.hw, view.hh, size.width, size.height, dial])
+  }, [size.width, size.height, dial])
 
   useEffect(() => {
     let tracer: Tracer | null = null
@@ -487,20 +493,30 @@ export function Light() {
                 transition={{ type: 'spring', stiffness: 500, damping: 34 }}
                 className="flex items-center gap-2"
               >
-                <span className="font-mono text-[11px] text-white/55">
-                  {selectedShape.material} {selectedShape.kind}
-                </span>
-                <button
-                  type="button"
-                  className={pill}
-                  onClick={() =>
-                    updateShape(selectedShape.id, {
-                      material: selectedShape.material === 'glass' ? 'mirror' : 'glass',
-                    })
-                  }
-                >
-                  make {selectedShape.material === 'glass' ? 'mirror' : 'glass'}
-                </button>
+                <span className="hidden font-mono text-[11px] text-white/55 sm:inline">{selectedShape.kind}</span>
+                <MaterialPicker
+                  id="selected-material"
+                  value={selectedShape.material}
+                  onChange={(material) => updateShape(selectedShape.id, { material })}
+                />
+                {selectedShape.material === 'diffuse' && (
+                  <button
+                    type="button"
+                    className={`${pill} flex items-center gap-1.5`}
+                    aria-label={`tint: ${selectedShape.tint ?? 'white'} (click for the next)`}
+                    onClick={() => {
+                      const tint = selectedShape.tint ?? 'white'
+                      const next = TINT_ORDER[(TINT_ORDER.indexOf(tint) + 1) % TINT_ORDER.length]
+                      updateShape(selectedShape.id, { tint: next })
+                    }}
+                  >
+                    <span
+                      className="h-2.5 w-2.5 rounded-full ring-1 ring-white/40"
+                      style={{ background: TINTS[selectedShape.tint ?? 'white'].swatch }}
+                    />
+                    {selectedShape.tint ?? 'white'}
+                  </button>
+                )}
                 <button type="button" className={pill} onClick={() => removeShape(selectedShape.id)}>
                   remove
                 </button>
@@ -508,26 +524,7 @@ export function Light() {
             )}
           </AnimatePresence>
           <div className="flex items-center gap-1.5 sm:gap-2">
-            <div className="pointer-events-auto flex rounded-full border border-white/15 bg-black/40 p-0.5 font-mono text-[11px] backdrop-blur">
-              {(['glass', 'mirror'] as const).map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  aria-pressed={newMaterial === m}
-                  onClick={() => setNewMaterial(m)}
-                  className={`relative rounded-full px-2.5 py-1.5 transition-colors sm:py-1 ${newMaterial === m ? 'text-black' : 'text-white/70 hover:text-white'}`}
-                >
-                  {newMaterial === m && (
-                    <motion.span
-                      layoutId="material"
-                      className="absolute inset-0 rounded-full bg-white/85"
-                      transition={{ type: 'spring', stiffness: 500, damping: 36 }}
-                    />
-                  )}
-                  <span className="relative">{m}</span>
-                </button>
-              ))}
-            </div>
+            <MaterialPicker id="new-material" value={newMaterial} onChange={setNewMaterial} />
             {(['triangle', 'circle', 'hexagon'] as const).map((k) => (
               <button
                 key={k}
@@ -557,12 +554,45 @@ export function Light() {
   )
 }
 
+const MATERIALS: Material[] = ['glass', 'mirror', 'diffuse']
+
+function MaterialPicker({ id, value, onChange }: { id: string; value: Material; onChange: (m: Material) => void }) {
+  return (
+    <div className="pointer-events-auto flex rounded-full border border-white/15 bg-black/40 p-0.5 font-mono text-[11px] backdrop-blur">
+      {MATERIALS.map((m) => (
+        <button
+          key={m}
+          type="button"
+          aria-pressed={value === m}
+          onClick={() => onChange(m)}
+          className={`relative rounded-full px-2 py-1.5 transition-colors sm:px-2.5 sm:py-1 ${value === m ? 'text-black' : 'text-white/70 hover:text-white'}`}
+        >
+          {value === m && (
+            <motion.span
+              layoutId={id}
+              className="absolute inset-0 rounded-full bg-white/85"
+              transition={{ type: 'spring', stiffness: 500, damping: 36 }}
+            />
+          )}
+          <span className="relative">{m}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+const SHAPE_STYLE: Record<Material, { fill: string; stroke: string; strokeWidth: number }> = {
+  glass: { fill: 'rgba(170,205,255,0.045)', stroke: 'rgba(205,228,255,0.5)', strokeWidth: 1.25 },
+  mirror: { fill: 'rgba(150,160,180,0.22)', stroke: 'rgba(240,244,252,0.95)', strokeWidth: 2.25 },
+  diffuse: { fill: '', stroke: 'rgba(0,0,0,0.35)', strokeWidth: 1 },
+}
+
 function ShapeView({ shape: s, selected }: { shape: Shape; selected: boolean }) {
-  const glass = s.material === 'glass'
+  const base = SHAPE_STYLE[s.material]
   const style = {
-    fill: glass ? 'rgba(170,205,255,0.045)' : 'rgba(150,160,180,0.22)',
-    stroke: glass ? 'rgba(205,228,255,0.5)' : 'rgba(240,244,252,0.95)',
-    strokeWidth: glass ? 1.25 : 2.25,
+    ...base,
+    // Matte shapes are solid: filled with their tint, so they read as opaque objects.
+    fill: s.material === 'diffuse' ? TINTS[s.tint ?? 'white'].swatch : base.fill,
     vectorEffect: 'non-scaling-stroke' as const,
   }
   const outline =

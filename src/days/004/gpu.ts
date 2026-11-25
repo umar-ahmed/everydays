@@ -124,6 +124,8 @@ export class GpuTracer implements Tracer {
   private cols: StorageBufferNode<'vec4'>
   private edges: StorageBufferNode<'vec4'>
   private circles: StorageBufferNode<'vec4'>
+  private edgeSurfaces: StorageBufferNode<'vec4'>
+  private circleSurfaces: StorageBufferNode<'vec4'>
   private kernel: THREE.ComputeNode
   private lines: THREE.Mesh
   private geometry: THREE.InstancedBufferGeometry
@@ -146,12 +148,11 @@ export class GpuTracer implements Tracer {
     dispersion: uniform(0),
     haze: uniform(0),
     walls: uniform(0),
+    albedo: uniform(0),
     weight: uniform(0),
     view: uniform(new THREE.Vector2(1, 1)),
     edgeCount: uniform(0, 'int'),
-    glassEdges: uniform(0, 'int'),
     circleCount: uniform(0, 'int'),
-    glassCircles: uniform(0, 'int'),
     jitterA: uniform(0, 'uint'),
     jitterB: uniform(0, 'uint'),
     seed: uniform(0, 'uint'),
@@ -187,6 +188,11 @@ export class GpuTracer implements Tracer {
     this.cols = instancedArray(count, 'vec4') as unknown as StorageBufferNode<'vec4'>
     this.edges = instancedArray(new Float32Array(MAX_EDGES * 4), 'vec4') as unknown as StorageBufferNode<'vec4'>
     this.circles = instancedArray(new Float32Array(MAX_SHAPES * 4), 'vec4') as unknown as StorageBufferNode<'vec4'>
+    this.edgeSurfaces = instancedArray(new Float32Array(MAX_EDGES * 4), 'vec4') as unknown as StorageBufferNode<'vec4'>
+    this.circleSurfaces = instancedArray(
+      new Float32Array(MAX_SHAPES * 4),
+      'vec4',
+    ) as unknown as StorageBufferNode<'vec4'>
     this.kernel = this.buildKernel()
 
     const plane = new THREE.PlaneGeometry(1, 1)
@@ -232,7 +238,7 @@ export class GpuTracer implements Tracer {
   }
 
   private buildKernel() {
-    const { u, segs, cols, edges, circles } = this
+    const { u, segs, cols, edges, circles, edgeSurfaces, circleSurfaces } = this
     return Fn(() => {
       const path = instanceIndex
       const rng = pcg(path.add(pcg(u.seed.add(uint(1))))).toVar()
@@ -266,7 +272,7 @@ export class GpuTracer implements Tracer {
           segs.element(slot).assign(vec4(0))
           cols.element(slot).assign(vec4(0))
         }).Else(() => {
-          // Walls: the view's edges, normals inward. 0 wall, 1 glass, 2 mirror.
+          // Walls: the view's edges, normals inward. 0 wall, 1 glass, 2 mirror, 3 diffuse.
           const tx = select(d.x.greaterThan(0), u.view.x.sub(o.x), u.view.x.negate().sub(o.x)).div(d.x)
           const ty = select(d.y.greaterThan(0), u.view.y.sub(o.y), u.view.y.negate().sub(o.y)).div(d.y)
           const xFirst = abs(d.y)
@@ -275,6 +281,7 @@ export class GpuTracer implements Tracer {
           const tHit = max(select(xFirst, tx, ty), 0).toVar()
           const nrm = select(xFirst, vec2(d.x.sign().negate(), 0), vec2(0, d.y.sign().negate())).toVar()
           const kind = int(0).toVar()
+          const surf = vec4(0).toVar()
 
           Loop({ start: int(0), end: u.edgeCount, type: 'int', condition: '<' }, ({ i: e }) => {
             const seg = edges.element(e)
@@ -294,7 +301,8 @@ export class GpuTracer implements Tracer {
               () => {
                 tHit.assign(t)
                 nrm.assign(normalize(vec2(ed.y, ed.x.negate())))
-                kind.assign(select(e.lessThan(u.glassEdges), int(1), int(2)))
+                surf.assign(edgeSurfaces.element(e))
+                kind.assign(int(surf.x).add(1))
               },
             )
           })
@@ -310,7 +318,8 @@ export class GpuTracer implements Tracer {
             If(disc.greaterThanEqual(0).and(t.greaterThan(EPS)).and(t.lessThan(tHit)), () => {
               tHit.assign(t)
               nrm.assign(q.add(d.mul(t)).div(circle.z))
-              kind.assign(select(c.lessThan(u.glassCircles), int(1), int(2)))
+              surf.assign(circleSurfaces.element(c))
+              kind.assign(int(surf.x).add(1))
             })
           })
 
@@ -328,14 +337,26 @@ export class GpuTracer implements Tracer {
             const phi = r1.mul(Math.PI * 2)
             d.assign(vec2(cos(phi), sin(phi)))
           })
-            .ElseIf(kind.equal(0), () => {
+            .ElseIf(kind.equal(0).or(kind.equal(3)), () => {
               // Russian roulette on the albedo keeps every drawn segment at full strength.
-              If(r1.greaterThanEqual(u.walls), () => {
+              const bump = lambda.sub(surf.y).div(max(surf.z, 1e-3))
+              const tint = select(
+                surf.z.greaterThan(0),
+                surf.w.add(
+                  float(1)
+                    .sub(surf.w)
+                    .mul(exp(bump.mul(bump).mul(-0.5))),
+                ),
+                float(1),
+              )
+              If(r1.greaterThanEqual(select(kind.equal(0), u.walls, u.albedo.mul(tint))), () => {
                 alive.assign(0)
               })
+              // Bounce off the side the light arrived from, cosine-weighted about that normal.
+              const nn = select(d.dot(nrm).lessThan(0), nrm, nrm.negate())
               const s = r2b.mul(2).sub(1)
               const k = sqrt(max(float(1).sub(s.mul(s)), 0))
-              d.assign(vec2(nrm.x.mul(k).sub(nrm.y.mul(s)), nrm.y.mul(k).add(nrm.x.mul(s))))
+              d.assign(vec2(nn.x.mul(k).sub(nn.y.mul(s)), nn.y.mul(k).add(nn.x.mul(s))))
             })
             .ElseIf(kind.equal(2), () => {
               d.assign(d.sub(nrm.mul(d.dot(nrm).mul(2))))
@@ -440,9 +461,11 @@ export class GpuTracer implements Tracer {
     ;(this.circles.value.array as Float32Array).set(c.circles)
     this.circles.value.needsUpdate = true
     u.edgeCount.value = c.edgeCount
-    u.glassEdges.value = c.glassEdges
+    ;(this.edgeSurfaces.value.array as Float32Array).set(c.edgeSurfaces)
+    this.edgeSurfaces.value.needsUpdate = true
+    ;(this.circleSurfaces.value.array as Float32Array).set(c.circleSurfaces)
+    this.circleSurfaces.value.needsUpdate = true
     u.circleCount.value = c.circleCount
-    u.glassCircles.value = c.glassCircles
     u.flash.value.set(scene.flashlight.x, scene.flashlight.y)
     u.rot.value = (optics.rotation * Math.PI) / 180
     u.cone.value = (optics.cone * Math.PI) / 180
@@ -452,6 +475,7 @@ export class GpuTracer implements Tracer {
     u.dispersion.value = optics.dispersion
     u.haze.value = optics.haze
     u.walls.value = optics.walls
+    u.albedo.value = optics.albedo
     u.view.value.set(view.hw, view.hh)
     u.weight.value = (optics.power * BRIGHTNESS * heightPx) / this.pathsPerFrame
   }

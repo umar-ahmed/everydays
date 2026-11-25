@@ -7,6 +7,10 @@ import {
   defaultScene,
   fresnel,
   intersect,
+  MATERIAL_CODE,
+  reflectance,
+  surfaceReflectance,
+  TINTS,
   makeShape,
   polygon,
   refit,
@@ -25,6 +29,7 @@ const optics: Optics = {
   dispersion: 0.02,
   haze: 0,
   walls: 0,
+  albedo: 0.8,
 }
 const view = { hw: 2, hh: 1 }
 
@@ -78,14 +83,15 @@ describe('geometry', () => {
     }
   })
 
-  it('finds the nearest surface and sorts glass before mirrors', () => {
+  it('finds the nearest surface and its material', () => {
     const shapes = [
       makeShape({ kind: 'circle', material: 'mirror', x: 1, y: 0, r: 0.2, angle: 0 }),
       makeShape({ kind: 'hexagon', material: 'glass', x: 0.2, y: 0, r: 0.1, angle: 0 }),
     ]
     const c = compile(shapes)
-    expect(c.glassEdges).toBe(6)
-    expect(c.circleCount - c.glassCircles).toBe(1)
+    expect(c.edgeCount).toBe(6)
+    expect(c.circleSurfaces[0]).toBe(MATERIAL_CODE.mirror)
+    expect(c.edgeSurfaces[0]).toBe(MATERIAL_CODE.glass)
     const hit = intersect(c, view, -1, 0, 1, 0)
     expect(hit.kind).toBe('glass')
     expect(hit.nx).toBeLessThan(0)
@@ -175,5 +181,54 @@ describe('refit', () => {
     expect(back.rotation).toBeCloseTo(rotation)
     expect(back.scene.shapes[0].angle).toBeCloseTo(scene.shapes[0].angle)
     expect(refit(scene, rotation, land, { hw: 1.6, hh: 1 }).rotation).toBe(rotation)
+  })
+})
+
+describe('diffuse shapes', () => {
+  const lcg = (seed: number) => () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646
+
+  it('reflect by their tint: flat for white, long wavelengths for red', () => {
+    for (const l of [400, 550, 700]) expect(reflectance(l, 'white')).toBe(1)
+    expect(reflectance(660, 'red')).toBeGreaterThan(0.8)
+    expect(reflectance(450, 'red')).toBeLessThan(0.06)
+    expect(reflectance(535, 'green')).toBeCloseTo(1)
+    expect(reflectance(650, 'green')).toBeLessThan(0.06)
+    expect(reflectance(440, 'blue')).toBeCloseTo(1)
+    expect(reflectance(600, 'blue')).toBeLessThan(0.06)
+    const red = TINTS.red
+    expect(surfaceReflectance(620, [2, red.center, red.width, red.floor])).toBeCloseTo(reflectance(620, 'red'))
+  })
+
+  it('bounce cosine-weighted off the lit side, surviving in proportion to albedo times reflectance', () => {
+    // A big matte hexagon right in front of the flashlight; light hits its left face head-on.
+    const s = {
+      flashlight: { x: -1.5, y: 0 },
+      shapes: [makeShape({ kind: 'hexagon', material: 'diffuse', x: 0.5, y: 0, r: 0.6, angle: 0 })],
+    }
+    const run = (tint: 'white' | 'red', lambda: number) => {
+      s.shapes[0].tint = tint
+      const rand = lcg(11)
+      let survived = 0
+      let cosSum = 0
+      const n = 4000
+      for (let p = 0; p < n; p++) {
+        const segs = tracePath(compile(s.shapes), view, s, { ...optics, bounces: 1, albedo: 0.8 }, lambda, rand)
+        expect(segs[0].x1).toBeCloseTo(0.5 - 0.6 * Math.cos(Math.PI / 6), 5)
+        if (segs.length < 2) continue
+        survived++
+        const g = segs[1]
+        const dx = g.x1 - g.x0
+        const dy = g.y1 - g.y0
+        // The lit face's normal is -x: every bounce leaves back toward the light.
+        expect(dx).toBeLessThan(0)
+        cosSum += -dx / Math.hypot(dx, dy)
+      }
+      return { survival: survived / n, meanCos: cosSum / survived }
+    }
+    const white = run('white', 550)
+    expect(white.survival).toBeCloseTo(0.8, 1)
+    expect(white.meanCos).toBeCloseTo(Math.PI / 4, 1)
+    expect(run('red', 660).survival).toBeGreaterThan(0.65)
+    expect(run('red', 450).survival).toBeLessThan(0.06)
   })
 })

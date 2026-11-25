@@ -7,7 +7,8 @@
  */
 
 export type ShapeKind = 'triangle' | 'circle' | 'hexagon'
-export type Material = 'glass' | 'mirror'
+export type Material = 'glass' | 'mirror' | 'diffuse'
+export type Tint = 'white' | 'red' | 'green' | 'blue'
 
 export type Shape = {
   id: number
@@ -19,6 +20,8 @@ export type Shape = {
   r: number
   /** Radians, clockwise on screen. */
   angle: number
+  /** Spectral reflectance of a diffuse shape (white if unset). */
+  tint?: Tint
 }
 
 export type Flashlight = { x: number; y: number }
@@ -44,6 +47,8 @@ export type Optics = {
   haze: number
   /** Albedo of the diffuse walls. */
   walls: number
+  /** Albedo of diffuse shapes, scaled per wavelength by their tint. */
+  albedo: number
 }
 
 export const LAMBDA_MIN = 380
@@ -57,6 +62,29 @@ export const MAX_SHAPES = 16
 export const MAX_EDGES = MAX_SHAPES * 6
 export const EPS = 1e-4
 
+/**
+ * Spectral reflectance curves for diffuse shapes: a smooth Gaussian bump over wavelength (nm)
+ * on top of a small floor, or flat for white. `swatch` is how the shape is drawn.
+ */
+export const TINTS: Record<Tint, { center: number; width: number; floor: number; swatch: string }> = {
+  white: { center: 550, width: 0, floor: 1, swatch: '#d9d5cc' },
+  red: { center: 690, width: 75, floor: 0.04, swatch: '#c8473b' },
+  green: { center: 535, width: 38, floor: 0.04, swatch: '#4d9e57' },
+  blue: { center: 440, width: 42, floor: 0.04, swatch: '#4163bd' },
+}
+export const TINT_ORDER: Tint[] = ['white', 'red', 'green', 'blue']
+
+/** Fraction of light at `lambda` a tint reflects (before the albedo). */
+export function reflectance(lambda: number, tint: Tint = 'white') {
+  const { center, width, floor } = TINTS[tint]
+  if (width <= 0) return 1
+  const t = (lambda - center) / width
+  return floor + (1 - floor) * Math.exp(-0.5 * t * t)
+}
+
+/** Material codes in the compiled scene. */
+export const MATERIAL_CODE: Record<Material, number> = { glass: 0, mirror: 1, diffuse: 2 }
+
 export const SIDES: Record<ShapeKind, number> = { triangle: 3, circle: 0, hexagon: 6 }
 
 /** Vertices of a regular polygon, counter-clockwise in math orientation; triangles point up at angle 0. */
@@ -69,45 +97,52 @@ export function polygon(s: Shape): [number, number][] {
 }
 
 /**
- * The scene flattened for tracing: edges (x0, y0, x1, y1) and circles (cx, cy, r, 0), glass
- * first, then mirrors, so a hit's material is just whether its index is below the glass count.
- * Each polygon's edges run so that (ey, -ex) is the outward normal.
+ * The scene flattened for tracing: edges (x0, y0, x1, y1) and circles (cx, cy, r, 0), each with
+ * a surface (material code, tint centre, tint width, tint floor). Each polygon's edges run so
+ * that (ey, -ex) is the outward normal.
  */
 export type Compiled = {
   edges: Float32Array
+  edgeSurfaces: Float32Array
   edgeCount: number
-  glassEdges: number
   circles: Float32Array
+  circleSurfaces: Float32Array
   circleCount: number
-  glassCircles: number
+}
+
+const surface = (s: Shape) => {
+  const t = TINTS[s.tint ?? 'white']
+  return [MATERIAL_CODE[s.material], t.center, t.width, t.floor]
 }
 
 export function compile(shapes: Shape[]): Compiled {
   const edges = new Float32Array(MAX_EDGES * 4)
+  const edgeSurfaces = new Float32Array(MAX_EDGES * 4)
   const circles = new Float32Array(MAX_SHAPES * 4)
+  const circleSurfaces = new Float32Array(MAX_SHAPES * 4)
   let edgeCount = 0
   let circleCount = 0
-  let glassEdges = 0
-  let glassCircles = 0
-  for (const material of ['glass', 'mirror'] as const) {
-    for (const s of shapes.slice(0, MAX_SHAPES)) {
-      if (s.material !== material) continue
-      if (s.kind === 'circle') {
-        circles.set([s.x, s.y, s.r, 0], circleCount++ * 4)
-        continue
-      }
-      const v = polygon(s)
-      for (let i = 0; i < v.length; i++) {
-        const [a, b] = [v[i], v[(i + 1) % v.length]]
-        edges.set([a[0], a[1], b[0], b[1]], edgeCount++ * 4)
-      }
+  for (const s of shapes.slice(0, MAX_SHAPES)) {
+    if (s.kind === 'circle') {
+      circleSurfaces.set(surface(s), circleCount * 4)
+      circles.set([s.x, s.y, s.r, 0], circleCount++ * 4)
+      continue
     }
-    if (material === 'glass') {
-      glassEdges = edgeCount
-      glassCircles = circleCount
+    const v = polygon(s)
+    for (let i = 0; i < v.length; i++) {
+      const [a, b] = [v[i], v[(i + 1) % v.length]]
+      edgeSurfaces.set(surface(s), edgeCount * 4)
+      edges.set([a[0], a[1], b[0], b[1]], edgeCount++ * 4)
     }
   }
-  return { edges, edgeCount, glassEdges, circles, circleCount, glassCircles }
+  return { edges, edgeSurfaces, edgeCount, circles, circleSurfaces, circleCount }
+}
+
+/** Spectral reflectance of a compiled surface (material, centre, width, floor). */
+export function surfaceReflectance(lambda: number, s: ArrayLike<number>) {
+  if (s[2] <= 0) return 1
+  const t = (lambda - s[1]) / s[2]
+  return s[3] + (1 - s[3]) * Math.exp(-0.5 * t * t)
 }
 
 /** Cauchy's equation, with the wavelength in nm. */
@@ -190,7 +225,9 @@ export type View = { hw: number; hh: number }
 /** Half extents of the view for an aspect ratio (width / height): the shorter side spans [-1, 1]. */
 export const viewFor = (aspect: number): View => (aspect >= 1 ? { hw: aspect, hh: 1 } : { hw: 1, hh: 1 / aspect })
 
-export type Hit = { t: number; nx: number; ny: number; kind: 'wall' | 'glass' | 'mirror' }
+const MATERIALS: Material[] = ['glass', 'mirror', 'diffuse']
+
+export type Hit = { t: number; nx: number; ny: number; kind: 'wall' | Material; surface: number[] }
 
 /** Nearest surface along a ray inside the view; the normal is outward for shapes, inward for walls. */
 export function intersect(c: Compiled, view: View, ox: number, oy: number, dx: number, dy: number): Hit {
@@ -198,8 +235,8 @@ export function intersect(c: Compiled, view: View, ox: number, oy: number, dx: n
   const ty = dy > 0 ? (view.hh - oy) / dy : dy < 0 ? (-view.hh - oy) / dy : Infinity
   const hit: Hit =
     tx < ty
-      ? { t: Math.max(tx, 0), nx: -Math.sign(dx), ny: 0, kind: 'wall' }
-      : { t: Math.max(ty, 0), nx: 0, ny: -Math.sign(dy), kind: 'wall' }
+      ? { t: Math.max(tx, 0), nx: -Math.sign(dx), ny: 0, kind: 'wall', surface: [] }
+      : { t: Math.max(ty, 0), nx: 0, ny: -Math.sign(dy), kind: 'wall', surface: [] }
   for (let i = 0; i < c.edgeCount; i++) {
     const [x0, y0, x1, y1] = c.edges.subarray(i * 4, i * 4 + 4)
     const ex = x1 - x0
@@ -212,7 +249,8 @@ export function intersect(c: Compiled, view: View, ox: number, oy: number, dx: n
     const s = (px * dy - py * dx) / den
     if (t > EPS && t < hit.t && s >= 0 && s <= 1) {
       const len = Math.hypot(ex, ey)
-      Object.assign(hit, { t, nx: ey / len, ny: -ex / len, kind: i < c.glassEdges ? 'glass' : 'mirror' })
+      const surface = [...c.edgeSurfaces.subarray(i * 4, i * 4 + 4)]
+      Object.assign(hit, { t, nx: ey / len, ny: -ex / len, kind: MATERIALS[surface[0]], surface })
     }
   }
   for (let i = 0; i < c.circleCount; i++) {
@@ -227,17 +265,28 @@ export function intersect(c: Compiled, view: View, ox: number, oy: number, dx: n
     if (t > EPS && t < hit.t) {
       const nx = (qx + t * dx) / r
       const ny = (qy + t * dy) / r
-      Object.assign(hit, { t, nx, ny, kind: i < c.glassCircles ? 'glass' : 'mirror' })
+      const surface = [...c.circleSurfaces.subarray(i * 4, i * 4 + 4)]
+      Object.assign(hit, { t, nx, ny, kind: MATERIALS[surface[0]], surface })
     }
   }
   return hit
+}
+
+/**
+ * A 2D Lambertian bounce: radiance leaving at angle θ from the normal is proportional to cos θ,
+ * so sin θ is uniform on [-1, 1].
+ */
+export function lambert(nx: number, ny: number, u: number): [number, number] {
+  const s = 2 * u - 1
+  const k = Math.sqrt(1 - s * s)
+  return [nx * k - ny * s, ny * k + nx * s]
 }
 
 export type Segment = { x0: number; y0: number; x1: number; y1: number; throughput: number }
 
 /**
  * One light path: emitted from the flashlight's lens at wavelength `lambda`, then up to
- * `bounces` scattering events (air, walls, mirrors, glass). Returns the segments it travels;
+ * `bounces` scattering events (air, walls, mirrors, glass, matte shapes). Returns the segments it travels;
  * each carries the fraction of the path's power still in it.
  */
 export function tracePath(
@@ -270,13 +319,13 @@ export function tracePath(
       const phi = rand() * 2 * Math.PI
       dx = Math.cos(phi)
       dy = Math.sin(phi)
-    } else if (hit.kind === 'wall') {
+    } else if (hit.kind === 'wall' || hit.kind === 'diffuse') {
       // Russian roulette on the albedo keeps every drawn segment at full strength.
-      if (rand() >= o.walls) break
-      const s = 2 * rand() - 1
-      const k = Math.sqrt(1 - s * s)
-      dx = hit.nx * k - hit.ny * s
-      dy = hit.ny * k + hit.nx * s
+      const survive = hit.kind === 'wall' ? o.walls : o.albedo * surfaceReflectance(lambda, hit.surface)
+      if (rand() >= survive) break
+      // Bounce off the side the light arrived from, cosine-weighted about that normal.
+      const side = dx * hit.nx + dy * hit.ny < 0 ? 1 : -1
+      ;[dx, dy] = lambert(hit.nx * side, hit.ny * side, rand())
     } else if (hit.kind === 'mirror') {
       const d = dx * hit.nx + dy * hit.ny
       dx -= 2 * d * hit.nx
@@ -360,6 +409,7 @@ export function defaultScene(aspect: number): { scene: Scene; rotation: number }
     makeShape({ kind: 'triangle', material: 'glass', ...at(-0.5, 0.02), r: 0.34, angle: turn }),
     makeShape({ kind: 'circle', material: 'glass', ...at(0.27, 0.25), r: 0.19, angle: 0 }),
     makeShape({ kind: 'hexagon', material: 'mirror', ...at(0.8, 0.55), r: 0.15, angle: 0.1 + turn }),
+    makeShape({ kind: 'circle', material: 'diffuse', tint: 'white', ...at(0.8, -0.44), r: 0.13, angle: 0 }),
   ]
   const [fx, fy] = place(-1.5, 0.26)
   return { scene: { flashlight: { x: fx, y: fy }, shapes }, rotation: portrait ? -111 : -21 }
