@@ -20,6 +20,7 @@ mkdirSync('public/002', { recursive: true })
 mkdirSync('public/003', { recursive: true })
 mkdirSync('public/004', { recursive: true })
 mkdirSync('public/005', { recursive: true })
+mkdirSync('public/006', { recursive: true })
 mkdirSync(framesDir, { recursive: true })
 
 const browser = await chromium.launch({
@@ -194,13 +195,29 @@ async function day005() {
   await page.close()
 }
 
+async function day006() {
+  const page = await browser.newPage({ viewport: size, deviceScaleFactor: 1 })
+  // A fake clock (performance.now and rAF) freezes the strings at an exact moment of the strum.
+  await page.clock.install()
+  await page.goto(`${base}/006/`)
+  await page.clock.runFor(1500)
+  await page.waitForFunction(() => window.pluckLab)
+  await page.addStyleTag({ content: '.dialkit-root,[data-chrome]{display:none!important}' })
+  await page.evaluate(() => window.pluckLab.strum())
+  // Strings are plucked 32 ms apart; catch them mid-swing.
+  await page.clock.runFor(235)
+  await page.screenshot({ path: 'public/006/og.png' })
+  await page.close()
+}
+
 if (want('index')) await indexCard()
 if (want('001')) await day001()
 if (want('002')) await day002()
 if (want('003')) await day003()
 if (want('004')) await day004()
 if (want('005')) await day005()
+if (want('006')) await day006()
 await browser.close()
 console.log(
-  `wrote ${only ? [...only].join(', ') : 'index, 001, 002, 003, 004, 005'} cards (day 001 frame ${pick}; frames in ${framesDir})`,
+  `wrote ${only ? [...only].join(', ') : 'index, 001, 002, 003, 004, 005, 006'} cards (day 001 frame ${pick}; frames in ${framesDir})`,
 )

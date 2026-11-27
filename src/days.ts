@@ -41,6 +41,13 @@ export const days: Day[] = [
       'A magnifying glass made of type: letters in a variable font swell in weight and width as your cursor or finger nears, then spring back.',
     date: '2026-11-25',
   },
+  {
+    slug: '006',
+    title: 'pluck lab',
+    concept:
+      'A row of strings you strum with your cursor or fingers, each one synthesized live by Karplus-Strong physical modelling in an AudioWorklet. No samples.',
+    date: '2026-11-27',
+  },
 ]
 
 export const site = {
